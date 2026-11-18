@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from griptile_core.assembler import Assembler
-from griptile_core.contact_image import INVALID_RGB, STRONG_RGB, UNLOADED_RGB, WEAK_RGB, contact_surface_rgb
+from griptile_core.contact_image import INVALID_RGB, STRONG_RGB, UNLOADED_RGB, WEAK_RGB
 from griptile_core.grid import LAYOUT_ID
 from griptile_core.protocol import Block, PROTOCOL_ID
 from griptile_core.serial_source import Batch
@@ -141,10 +141,10 @@ def test_qt_native_rgb_png_and_diagnostic_modes(monkeypatch, tmp_path):
     model.accept_image(image(state, pixels))
     requests = []
     window = ViewerWindow(model, clock_ns=lambda: 0, request_reference=requests.append)
-    window.mode.setCurrentIndex(CONTACT_MODE)
     window.show()
     app.processEvents()
     model.select(2, 3)
+    window.mode.setCurrentIndex(CONTACT_MODE)
     window.refresh()
     assert window.mode.currentIndex() == CONTACT_MODE
     assert window.image.axisOrder == "row-major"
@@ -220,17 +220,14 @@ def test_continuous_mode_png_selection_coordinates_and_native_export(monkeypatch
     requests = []
     window = ViewerWindow(model, clock_ns=lambda: clock_ns, request_reference=requests.append)
     assert window.mode.currentIndex() == SURFACE_MODE
-    assert window.mode.currentText() == "柔和接触图（估算）"
+    assert not (window.map.renderHints() & QtGui.QPainter.SmoothPixmapTransform)
     window.show()
     app.processEvents()
     window.refresh()
-    assert window.map.renderHints() & QtGui.QPainter.SmoothPixmapTransform
     assert "接触 1 点" in window.legend.text() and "399/400" in window.legend.text()
     original = window.image.image
     assert original.shape == (300, 300, 3)
-    np.testing.assert_array_equal(original, contact_surface_rgb(field, model.current_reference.span_adc))
-    peak = original[3 * 15 + 7, 12 * 15 + 7]
-    assert peak[0] > peak[1] and peak[0] > peak[2]
+    np.testing.assert_array_equal(original[3 * 15 + 7, 12 * 15 + 7], STRONG_RGB)
     # The 300-pixel image still occupies [0,20) on both axes, including after mode switches.
     for row, col in ((0, 0), (19, 19), (3, 12), (17, 2)):
         scene = window.image.mapToScene(QtCore.QPointF((col + .5) * 15, (row + .5) * 15))

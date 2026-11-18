@@ -1,10 +1,10 @@
 # griptile_driver
 
-A ROS 2 driver and a 2D viewer for one USB serial gripper tactile array. The default view renders a soft contact footprint from the 20×20 array. See where the gripper touches an object, how many cells respond and how response varies across its contact footprint. The driver owns the serial device and ROS subscribers share its output. [中文说明](../README.md)
+A ROS 2 driver and a 2D viewer for one USB serial gripper tactile array. Each taxel maps to one RGB pixel. See where the gripper touches an object, how many cells respond and how response varies across its contact footprint. The driver owns the serial device and ROS subscribers share its output. [中文说明](../README.md)
 
-![Native and soft views of the same simulated contacts](contact-surface-comparison.png)
+![Simulated release, ring and two separated pads captured from the ROS image topic](contact-footprints.png)
 
-[Qt window](viewer-demo.png) · [Previous and current rendering](contact-surface-softening.png) · [Native 20×20 RGB example](contact-ring.png)
+[Native 20×20 RGB example](contact-ring.png) · [Qt window](viewer-demo.png)
 
 ## Build and run
 
@@ -31,7 +31,11 @@ ros2 launch griptile_driver sensor.launch.py port:=/dev/ttyUSB0 gui:=true
 
 The default contact view uses row and column addresses 0–19, with row zero at the top and column zero at the left. Open the gripper, unload the surface and click the three-second reference button. Once the reference is ready, white pixels indicate measured cells with no detected contact. Weak contacts appear dark reddish brown and progress to saturated red. Gray pixels indicate missing reference or stale data. The demo supplies unloaded samples until the driver confirms the reference, then cycles through a ring, release and two separate contact patches.
 
-The viewer opens in **柔和接触图（估算）** and renders a 300×300 surface that fades partial boundary coverage into the white background. Export this view as a 300×300 PNG. Select **接触图 RGB** for the native 20×20 view, which uses nearest-neighbor magnification and exports a 20×20 PNG. Both views share the unloaded reference. Picking, per-cell traces and contact counts use the 400 measured addresses. Unknown taxels are gray. Force and pressure units need physical calibration, and physical area needs the dimensions of the sensing surface.
+The native **接触图 RGB** view magnifies the pixels with nearest-neighbor sampling. Contact-mode PNG export writes the original 20×20 RGB image. The contact footprint counts responding cells; conversion to physical area requires sensor dimensions. Intensity is a noise-gated ADC change; force or pressure units require physical calibration. Raw ADC and signed delta views, per-cell traces and CSV export remain available. Saved references can be reused with a verified matching device and layout.
+
+The default **连续接触面（估算）** view displays the same 400 taxels as a 300×300 RGB surface. The viewer interpolates noise-gated ADC amplitudes between neighboring taxel centers and estimates the contact outline from their active flags. Unknown regions stay gray. Colors at all 400 measured centers match the native grid. Picking, time series and contact counts still use the original addresses. The surface view exports a 300×300 PNG. Both views share the same unloaded reference.
+
+![Native and interpolated views of the same simulated ring and three broad ridges](contact-surface-comparison.png)
 
 The color scale is fixed across frames. The default full red response is 3000 ADC counts. Set `contact_span_adc:=6000.0` to extend the range. The default `contact_direction:=both` accepts either sign of ADC change. Select `increase` or `decrease` when the pressure polarity is known. All subscribers share the driver's calibration. From a headless terminal with the gripper unloaded, request it with the command below.
 
