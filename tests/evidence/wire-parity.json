@@ -1,0 +1,46 @@
+{
+  "baseline": {
+    "commit": "74e861c23aa54d104503c6e521d739ec25163c2b",
+    "package": "ros2_ws/src/vt_tactile_capture",
+    "package_tree": "8d38b222b7aaddf2b3b077c3e4c7c6d1d09f8c95"
+  },
+  "clocks": "Synthetic monotonic and realtime tags at 1 ms per read",
+  "compared_fields": "All parser outputs, counters, original live read tags, batch and state fields. The hand field is renamed sensor_id for comparison. Each data batch produces one snapshot including 400 ADC cells, valid and updated masks, 20 row clocks of each kind, loss count and status. A final age-expiry snapshot and parser resets are checked. Queue loss is zero in this synchronous replay.",
+  "distinct_file_row_addresses": 20,
+  "file_rows": 953,
+  "input": "user-supplied wire capture",
+  "input_bytes": 41932,
+  "input_sha256": "152007b2bb557306920e00eb36432f703f8daa4f18c2dc18b2a27e184b49df15",
+  "live_batches": 163,
+  "live_before_eof": {
+    "buffered_bytes": 44,
+    "discarded_bytes_total": 0,
+    "malformed_packets_total": 0
+  },
+  "live_rows": 952,
+  "max_age_ns": 100000000,
+  "read_size_bytes": 257,
+  "reads": 164,
+  "result": "equal",
+  "schema": 1,
+  "trace_events": {
+    "batches": 163,
+    "eof_reset_counters": 1,
+    "expired_snapshot": 1,
+    "file_counters": 164,
+    "file_rows": 164,
+    "live_counters": 164,
+    "snapshots": 163,
+    "tagged_live_rows": 164
+  },
+  "trace_sha256": {
+    "batches": "40e5498bec6c27d2fcf7940ba5de9b5038a6006cad880dd90df5f5a6ba6aebcc",
+    "eof_reset_counters": "9abadf6ea70bdc1fe9ce9507b5666405c6c68c5a2f89bc5dcc5ecfb59f7e006e",
+    "expired_snapshot": "33366917e81617ac5762c379778684f11f569f88328ec6a40280b24bd1b3c6c4",
+    "file_counters": "39386b46792addf54dbf1422a4e13bcebd5de0f4fadb8f3f15232a79d4e8426e",
+    "file_rows": "8af4acf7a74c4822141ba6f2c22dc8435f9ab931d2b976237c8b76d9ffd05d47",
+    "live_counters": "aee09869126a5956b27efb5eb2247555b3952a925dfcb476e842597c97966bab",
+    "snapshots": "39dfee104a0214e8df93bc71d16f760d984c241abce3173326a3be00406ac13d",
+    "tagged_live_rows": "ce6530e50b8a6cda53d312fdd0fbce9f6dc45d308916777dc4ecc0f51b7a7245"
+  }
+}

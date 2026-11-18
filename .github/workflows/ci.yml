@@ -1,0 +1,29 @@
+name: ROS 2 Jazzy
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  standalone:
+    runs-on: ubuntu-24.04
+    container: ros:jazzy-ros-base
+    defaults:
+      run:
+        shell: bash
+    env:
+      QT_QPA_PLATFORM: offscreen
+      ROS_AUTOMATIC_DISCOVERY_RANGE: LOCALHOST
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve package dependencies
+        run: |
+          apt-get update
+          apt-get install -y python3-colcon-common-extensions python3-rosdep
+          if [ ! -f /etc/ros/rosdep/sources.list.d/20-default.list ]; then rosdep init; fi
+          rosdep update --rosdistro jazzy
+          rosdep install --from-paths src --ignore-src --rosdistro jazzy -y
+      - name: Build and test installed packages
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          colcon build --base-paths src
+          source install/setup.bash
+          python3 -m pytest -q --import-mode=importlib src/*/test tests

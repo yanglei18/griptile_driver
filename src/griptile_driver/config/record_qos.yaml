@@ -1,0 +1,11 @@
+# For the default sensor namespace. Adjust topic names when using a custom namespace.
+/tactile/sensor_0/samples:
+  reliability: reliable
+  durability: volatile
+  history: keep_last
+  depth: 128
+/tactile/sensor_0/info:
+  reliability: reliable
+  durability: transient_local
+  history: keep_last
+  depth: 1

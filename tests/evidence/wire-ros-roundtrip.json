@@ -1,0 +1,14 @@
+{
+  "wire_bytes": 41932,
+  "wire_sha256": "152007b2bb557306920e00eb36432f703f8daa4f18c2dc18b2a27e184b49df15",
+  "sample_rows": 953,
+  "adc_values": 19060,
+  "replay_valid_cells": 400,
+  "all_recorded_rows_equal": true,
+  "replay_adc_masks_and_row_clocks_match": true,
+  "source_info_recorded": true,
+  "replay_info_available_after_player_exit": true,
+  "synthetic_lookahead_bytes": 4,
+  "physical_hardware_opened": false,
+  "input_kind": "archived_serial_bytes"
+}
