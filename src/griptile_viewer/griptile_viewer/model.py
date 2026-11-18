@@ -23,6 +23,7 @@ class ArrayView:
         # snapshots and images to match source stamps without blocking Qt.
         self._states = deque(maxlen=4)
         self._images = deque(maxlen=4)
+        self._responses = deque(maxlen=4)
         self.reference_status = None
         self.service_error = ""
         self._profile = None
@@ -37,6 +38,7 @@ class ArrayView:
     def reset_stream(self):
         self._states.clear()
         self._images.clear()
+        self._responses.clear()
         self.trend.clear()
         self.message = None
         self.identity = None
@@ -74,6 +76,8 @@ class ArrayView:
             return
         profile = None
         if status.phase == "ready":
+            if not 0 < status.span_adc <= 65535:
+                raise ValueError("接触参考量程超出 ADC 范围")
             profile = ReferenceProfile(np.asarray(status.baseline_adc), np.asarray(status.activation_threshold_adc),
                                        np.asarray(status.valid_mask, dtype=bool))
         self.reference_status, self._profile = status, profile
@@ -89,18 +93,39 @@ class ArrayView:
         pixels = np.frombuffer(bytes(image.data), dtype=np.uint8).reshape(ROWS, COLS, 3)
         self._images.append((self._key(image.header), pixels))
 
+    def accept_response(self, image):
+        if (image.encoding != "32FC1" or (image.height, image.width) != SHAPE
+                or image.step != COLS * 4 or len(image.data) != CELL_COUNT * 4):
+            raise ValueError("接触响应用 20×20 个单通道浮点数表示")
+        dtype = ">f4" if image.is_bigendian else "<f4"
+        amplitude = np.frombuffer(image.data, dtype=dtype).astype(np.float32).reshape(SHAPE)
+        if np.isinf(amplitude).any() or (amplitude < 0).any():
+            raise ValueError("接触响应应为非负数或缺测值")
+        self._responses.append((self._key(image.header), amplitude))
+
+    def _paired_frame(self, frames, clock_ns):
+        reference = self.reference
+        if reference is not None and frames:
+            for key, state, received in reversed(self._states):
+                frame = next((data for stamp, data in reversed(frames) if stamp == key), None)
+                if frame is not None:
+                    fresh = self._mask_at(state, received, clock_ns) & self.mask(clock_ns)
+                    return frame, fresh & np.asarray(reference.valid_mask).reshape(SHAPE)
+        return None, None
+
     def contact_pixels(self, clock_ns):
-        unknown = np.full((ROWS, COLS, 3), INVALID_RGB, dtype=np.uint8)
-        if self.reference is None or not self._images:
-            return unknown
-        for key, state, received in reversed(self._states):
-            pixels = next((rgb for stamp, rgb in reversed(self._images) if stamp == key), None)
-            if pixels is not None:
-                fresh = self._mask_at(state, received, clock_ns) & self.mask(clock_ns)
-                valid = fresh & np.asarray(self.reference.valid_mask).reshape(SHAPE)
-                unknown[valid] = pixels[valid]
-                break
-        return unknown
+        image = np.full((ROWS, COLS, 3), INVALID_RGB, dtype=np.uint8)
+        frame, valid = self._paired_frame(self._images, clock_ns)
+        if frame is not None:
+            image[valid] = frame[valid]
+        return image
+
+    def contact_response(self, clock_ns):
+        amplitude = np.full(SHAPE, np.nan, dtype=np.float32)
+        frame, valid = self._paired_frame(self._responses, clock_ns)
+        if frame is not None:
+            amplitude[valid] = frame[valid]
+        return amplitude
 
     def accept(self, message, clock_ns):
         if message.sensor_id != self.sensor_id:
@@ -135,6 +160,7 @@ class ArrayView:
         if not message.connected or not message.time_valid:
             self._states.clear()
             self._images.clear()
+            self._responses.clear()
             self._break_trend()
             return True
         self._states.append((self._key(message.header), message, clock_ns))

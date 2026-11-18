@@ -169,3 +169,86 @@ def test_qt_native_rgb_png_and_diagnostic_modes(monkeypatch, tmp_path):
     assert window.mode.currentIndex() == CONTACT_MODE
     window.close()
     app.processEvents()
+
+
+def response(state, amplitude, *, bigendian=False):
+    data = np.asarray(amplitude, dtype=">f4" if bigendian else "<f4").tobytes()
+    return SimpleNamespace(header=state.header, height=20, width=20, encoding="32FC1", step=80,
+                           is_bigendian=bigendian, data=data)
+
+
+@pytest.mark.parametrize("bigendian", [False, True])
+def test_response_matches_source_stamp_reference_and_freshness(bigendian):
+    model = ArrayView(SENSOR)
+    assembler = Assembler(sensor_id=SENSOR)
+    state = snapshot(assembler, 1, START, (2, 13))
+    field = np.arange(400, dtype=np.float32).reshape(20, 20)
+    model.accept_response(response(state, field, bigendian=bigendian))
+    model.accept(state, 0)
+    assert np.isnan(model.contact_response(0)).all()
+    model.accept_reference(profile_status(rows=(2,)))
+    native = model.contact_response(0)
+    np.testing.assert_array_equal(native[2], field[2])
+    assert np.isnan(native[13]).all()
+    following = snapshot(assembler, 2, START + 50_000_000, (2, 13))
+    model.accept(following, 50_000_000)
+    assert np.isnan(model.contact_response(100_000_001)).all()
+    model.accept_response(response(following, field + 100))
+    assert model.contact_response(100_000_001)[2, 3] == 143
+    # Late arrival of the previous image cannot reinstate the old intensity.
+    model.accept_response(response(state, field))
+    assert model.contact_response(100_000_001)[2, 3] == 143
+    assert np.isnan(model.contact_response(150_000_001)).all()
+
+
+def test_continuous_mode_png_selection_coordinates_and_native_export(monkeypatch, tmp_path):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from griptile_viewer.window import CONTACT_MODE, SURFACE_MODE, QtCore, QtGui, QtWidgets, ViewerWindow
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    model = ArrayView(SENSOR)
+    assembler = Assembler(sensor_id=SENSOR)
+    state = snapshot(assembler, 1, START)
+    model.accept(state, 0)
+    model.accept_reference(profile_status())
+    field = np.zeros((20, 20), dtype=np.float32)
+    field[3, 12] = 3000
+    field[10, 1] = np.nan
+    model.accept_response(response(state, field))
+    clock_ns = 0
+    requests = []
+    window = ViewerWindow(model, clock_ns=lambda: clock_ns, request_reference=requests.append)
+    window.mode.setCurrentIndex(SURFACE_MODE)
+    window.show()
+    app.processEvents()
+    window.refresh()
+    assert "接触 1 点" in window.legend.text() and "399/400" in window.legend.text()
+    original = window.image.image
+    assert original.shape == (300, 300, 3)
+    np.testing.assert_array_equal(original[3 * 15 + 7, 12 * 15 + 7], STRONG_RGB)
+    # The 300-pixel image still occupies [0,20) on both axes, including after mode switches.
+    for row, col in ((0, 0), (19, 19), (3, 12), (17, 2)):
+        scene = window.image.mapToScene(QtCore.QPointF((col + .5) * 15, (row + .5) * 15))
+        assert window.cell_at(scene) == (row, col)
+    path = tmp_path / "surface.png"
+    window.save_png(path)
+    assert window.image.image is original or np.shares_memory(window.image.image, original)
+    decoded = QtGui.QImage(str(path)).convertToFormat(QtGui.QImage.Format_RGB888)
+    assert (decoded.width(), decoded.height()) == (300, 300)
+    pointer = decoded.constBits()
+    pointer.setsize(decoded.byteCount())
+    data = np.frombuffer(pointer, np.uint8).reshape(300, decoded.bytesPerLine())[:, :300 * 3]
+    np.testing.assert_array_equal(data.reshape(300, 300, 3), original)
+    window.reference_button.click()
+    assert requests == [None] and window.mode.currentIndex() == SURFACE_MODE
+    clock_ns = 100_000_001
+    window.refresh()
+    assert np.all(window.image.image == INVALID_RGB)
+    window.mode.setCurrentIndex(CONTACT_MODE)
+    window.refresh()
+    assert window.image.image.shape == (20, 20, 3)
+    path = tmp_path / "native.png"
+    window.save_png(path)
+    assert QtGui.QImage(str(path)).size() == QtCore.QSize(20, 20)
+    window.close()
+    app.processEvents()

@@ -5,7 +5,7 @@ from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from sensor_msgs.msg import Image
 
-from griptile_core.contact_image import DEFAULT_CONTACT_SPAN, contact_rgb
+from griptile_core.contact_image import DEFAULT_CONTACT_SPAN, amplitude_rgb, contact_amplitude
 from griptile_core.display_response import ReferenceProfile, ResponseSettings, TactileResponseProcessor
 from griptile_core.grid import COLS, LAYOUT_ID, ROWS
 from griptile_core.protocol import PROTOCOL_ID
@@ -32,6 +32,8 @@ class ContactImaging:
         self._published_reference = None
         self.image_publisher = node.create_publisher(
             Image, "contact_image", 1, event_callbacks=image_events)
+        self.response_publisher = node.create_publisher(
+            Image, "contact_response", 1, event_callbacks=image_events)
         self.reference_publisher = node.create_publisher(
             ContactReference, "contact_reference",
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
@@ -62,7 +64,7 @@ class ContactImaging:
                     and self.recorded_hardware_id != self.hardware_id)):
             self._clear_reference("hardware_changed")
             if self.state is not None:
-                self._publish_pixels(contact_rgb({"reference_ready": False}))
+                self._publish_response({"reference_ready": False})
         self._report()
 
     def _clear_reference(self, reason):
@@ -75,7 +77,7 @@ class ContactImaging:
         """Invalidate the latched reference even if a seek never produces another row."""
         self._clear_reference(reason)
         if self.state is not None:
-            self._publish_pixels(contact_rgb({"reference_ready": False}))
+            self._publish_response({"reference_ready": False})
         self.state = None
         self.info = None
         self.started_auto = False
@@ -175,11 +177,19 @@ class ContactImaging:
         else:
             response = {"reference_ready": False}
         self._report()
-        self._publish_pixels(contact_rgb(response))
+        self._publish_response(response)
 
-    def _publish_pixels(self, pixels):
+    def _publish_response(self, response):
+        # Both views use the same native scalar samples, including the same
+        # validity mask, so display interpolation never has to invert a color.
+        amplitude = contact_amplitude(response).astype("<f4")
+        header = self.state.header
+        self.response_publisher.publish(Image(
+            header=header, height=ROWS, width=COLS, encoding="32FC1", is_bigendian=0,
+            step=COLS * amplitude.itemsize, data=amplitude.tobytes()))
+        pixels = amplitude_rgb(amplitude, self.processor.settings.display_range_adc)
         self.image_publisher.publish(Image(
-            header=self.state.header, height=ROWS, width=COLS, encoding="rgb8",
+            header=header, height=ROWS, width=COLS, encoding="rgb8",
             step=COLS * 3, data=pixels.tobytes()))
 
     def _report(self):

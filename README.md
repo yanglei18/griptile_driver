@@ -43,6 +43,10 @@ ros2 launch griptile_driver sensor.launch.py port:=/dev/ttyUSB0 gui:=true
 
 图像为 20 行 × 20 列的三通道 `rgb8`，第 0 行在上、第 0 列在左。每个像素大小相同。界面按最近邻放大，接触模式导出的是原生 20×20 彩色 PNG。一个接触区占据的像素数量反映阵列上被触及的范围；细节分辨率受触点间距限制。颜色表示相对无载的 ADC 变化，换算牛顿、帕斯卡或平方毫米需要对应的力学标定或几何尺寸。
 
+在窗口左上角切换到「连续接触面（估算）」，可把同一帧显示为 300×300 的 RGB 图。驱动提供 400 个相对无载的响应值，窗口在相邻测点之间对响应强度做双线性插值，单独估算接触边界。缺测单元保留灰色，放大图在全部 400 个测点中心沿用原生颜色。点击读数、曲线和接触点数仍对应原始阵列。点击「导出估算图」可保存当前的 300×300 PNG。「接触图 RGB」可随时切回，两个视图共享一次无载参考。
+
+![同一组模拟触点的原生显示与连续估算，分别展示环形凸缘和三道宽纹](docs/contact-surface-comparison.png)
+
 显示使用固定色域，默认去噪后 3000 ADC 对应满红。启动时传入 `contact_span_adc:=6000.0` 可增大显示量程。默认 `contact_direction:=both` 同时接受 ADC 向上或向下的变化，已知夹爪受压极性时可选 `increase` 或 `decrease`。原始 ADC、有符号 ΔADC 和快照 CSV 均可用于诊断。已核验 USB 身份的设备支持保存和复用无载参考。
 
 无界面运行时也可以在夹爪张开的状态下采集参考。
@@ -62,6 +66,7 @@ ros2 service call /tactile/sensor_0/set_contact_reference griptile_msgs/srv/SetC
 | `state` | `griptile_msgs/msg/TactileGridState` | 供显示的滚动阵列，含逐行时间、有效掩码和更新掩码。默认 30 Hz |
 | `diagnostics` | `diagnostic_msgs/msg/DiagnosticArray` | 观察连接、数据龄期、丢批和结构错误 |
 | `contact_image` | `sensor_msgs/msg/Image` | 默认发布的原生接触图。20×20、`rgb8`、每行 60 字节，header 沿用源阵列时间 |
+| `contact_response` | `sensor_msgs/msg/Image` | 与原生接触图共用源时间，20×20、`32FC1`。值为去噪后的 ADC 变化幅值，0 为未触发，NaN 为缺测或无参考，保留超过显示量程的幅值 |
 | `contact_reference` | `griptile_msgs/msg/ContactReference` | 参考采集进度、设备和会话、就绪后的逐点基线及阈值、色域和极性。支持晚加入的订阅者 |
 | `heatmap` | `sensor_msgs/msg/Image` | 可选原始 ADC 彩色预览，通过 `publish_heatmap:=true` 启用 |
 

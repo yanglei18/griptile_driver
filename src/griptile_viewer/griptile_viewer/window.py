@@ -9,7 +9,9 @@ import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
-from griptile_core.contact_image import INVALID_RGB, STRONG_RGB, UNLOADED_RGB, WEAK_RGB
+from griptile_core.contact_image import (
+    DEFAULT_CONTACT_SPAN, INVALID_RGB, STRONG_RGB, UNLOADED_RGB, WEAK_RGB, contact_surface_rgb,
+)
 
 from griptile_core.grid import ROWS, COLS
 from .storage import load_reference, save_reference, save_snapshot
@@ -24,7 +26,7 @@ RAW = _palette(("#151629", "#383d87", "#157d98", "#45b88c", "#fee681"))
 DELTA = _palette(("#2d5eaf", "#8ab9e6", "#f9f8ee", "#f2a272", "#a0373c"))
 
 
-CONTACT_MODE, RAW_MODE, DELTA_MODE = range(3)
+CONTACT_MODE, SURFACE_MODE, RAW_MODE, DELTA_MODE = range(4)
 
 
 def _swatch(rgb, label):
@@ -68,7 +70,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
         layout.addWidget(self.status)
         controls = QtWidgets.QHBoxLayout()
         self.mode = QtWidgets.QComboBox()
-        self.mode.addItems(["接触图 RGB", "原始 ADC", "相对无载参考 ΔADC"])
+        self.mode.addItems(["接触图 RGB", "连续接触面（估算）", "原始 ADC", "相对无载参考 ΔADC"])
         controls.addWidget(self.mode)
         self.span_label = QtWidgets.QLabel("差值色限 ±")
         controls.addWidget(self.span_label)
@@ -125,16 +127,18 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self._file_button(footer, "保存参考", "JSON (*.json)", "save_ref")
         self._file_button(footer, "加载参考", "JSON (*.json)", "load_ref")
         self._file_button(footer, "导出 ADC 快照", "CSV (*.csv)", "csv")
-        self._file_button(footer, "导出图像", "PNG (*.png)", "png")
+        self.png_button = self._file_button(footer, "导出图像", "PNG (*.png)", "png")
         footer.addStretch()
         layout.addLayout(footer)
         self._format = None
+        self._surface_input = self._surface_span = self._surface_pixels = None
         self.refresh()
 
     def _file_button(self, layout, caption, pattern, action):
         button = QtWidgets.QPushButton(caption)
         button.clicked.connect(lambda: self.file_action(caption, pattern, action))
         layout.addWidget(button)
+        return button
 
     def file_action(self, caption, pattern, action):
         dialog = QtWidgets.QFileDialog
@@ -155,9 +159,11 @@ class ViewerWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage(str(error), 6000)
 
     def save_png(self, path):
-        if self.mode.currentIndex() == CONTACT_MODE:
-            pixels = self.model.contact_pixels(self.clock_ns())
-            image = QtGui.QImage(pixels.data, COLS, ROWS, pixels.strides[0], QtGui.QImage.Format_RGB888)
+        if self.mode.currentIndex() in (CONTACT_MODE, SURFACE_MODE):
+            self.refresh()
+            pixels = self.image.image
+            height, width = pixels.shape[:2]
+            image = QtGui.QImage(pixels.data, width, height, pixels.strides[0], QtGui.QImage.Format_RGB888)
         else:
             image = self.map.grab()
         if not image.save(str(path), "PNG"):
@@ -167,7 +173,8 @@ class ViewerWindow(QtWidgets.QMainWindow):
         if self.request_reference is None:
             raise ValueError("等待驱动的无载参考服务")
         self.request_reference(profile)
-        self.mode.setCurrentIndex(CONTACT_MODE)
+        if self.mode.currentIndex() != SURFACE_MODE:
+            self.mode.setCurrentIndex(CONTACT_MODE)
 
     def start_reference(self):
         try:
@@ -176,7 +183,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage(str(error), 5000)
 
     def cell_at(self, position):
-        data = self.image.mapFromScene(position)
+        data = self.map.getViewBox().mapSceneToView(position)
         if 0 <= data.y() < ROWS and 0 <= data.x() < COLS:
             return int(data.y()), int(data.x())
         return None
@@ -194,6 +201,12 @@ class ViewerWindow(QtWidgets.QMainWindow):
             label = f"{value:g} {'ΔADC' if delta else 'ADC'}" if np.isfinite(value) else "无有效值"
             self.statusBar().showMessage(f"行 {cell[0]}  列 {cell[1]}    {label}", 1500)
 
+    def _surface(self, amplitude, span):
+        if self._surface_span != span or not np.array_equal(self._surface_input, amplitude, equal_nan=True):
+            self._surface_pixels = contact_surface_rgb(amplitude, span)
+            self._surface_input, self._surface_span = amplitude, span
+        return self._surface_pixels
+
     def refresh(self):
         now = self.clock_ns()
         model = self.model
@@ -207,24 +220,40 @@ class ViewerWindow(QtWidgets.QMainWindow):
         valid = model.mask(now)
         mode = self.mode.currentIndex()
         delta = mode == DELTA_MODE
-        contact = mode == CONTACT_MODE
+        contact = mode in (CONTACT_MODE, SURFACE_MODE)
+        surface = mode == SURFACE_MODE
         self.span.setVisible(delta)
         self.span_label.setVisible(delta)
         self.scale.setVisible(contact)
-        if self._format != mode:
-            self.image.setLookupTable({CONTACT_MODE: None, RAW_MODE: RAW, DELTA_MODE: DELTA}[mode])
+        mode_changed = self._format != mode
+        if mode_changed:
+            self.image.setLookupTable({RAW_MODE: RAW, DELTA_MODE: DELTA}.get(mode))
+            self.png_button.setText("导出估算图" if surface else "导出图像")
             self._format = mode
         if contact:
-            frame = model.contact_pixels(now)
+            if surface:
+                amplitude = model.contact_response(now)
+                status = model.current_reference
+                span = status.span_adc if model.reference is not None else DEFAULT_CONTACT_SPAN
+                frame = self._surface(amplitude, span)
+                usable = np.isfinite(amplitude)
+                active = amplitude > 0
+            else:
+                frame = model.contact_pixels(now)
+                usable = np.any(frame != INVALID_RGB, axis=2)
+                active = usable & np.any(frame != UNLOADED_RGB, axis=2)
             self.image.setImage(frame, autoLevels=False, levels=None)
-            usable = np.any(frame != INVALID_RGB, axis=2)
-            active = usable & np.any(frame != UNLOADED_RGB, axis=2)
             summary = (f"接触 {active.sum()} 点　有效像素 {usable.sum()}/400" if usable.any()
                        else "接触点待测　有效像素 0/400")
+            if surface:
+                summary = "300×300 插值显示 · 20×20 实测点　" + summary
         else:
             levels = (-self.span.value(), self.span.value()) if delta else (0, 65535)
             self.image.setImage(model.values(now, delta), autoLevels=False, levels=levels)
             summary = f"色域 {levels[0]} 至 {levels[1]} {'ΔADC' if delta else 'ADC'}　灰色为无效单元"
+        if mode_changed:
+            # Both image resolutions occupy the same native sensor coordinates.
+            self.image.setRect(QtCore.QRectF(0, 0, COLS, ROWS))
         row, col = model.selected
         self.marker.setData([col + .5], [row + .5])
         raw = model.values(now)[row, col]

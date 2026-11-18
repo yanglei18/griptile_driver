@@ -33,6 +33,7 @@ class ViewerNode(Node):
         self.create_subscription(SensorInfo, "info", self.model.accept_info, metadata_qos)
         self.create_subscription(ContactReference, "contact_reference", self._on_reference, metadata_qos)
         self.create_subscription(Image, "contact_image", self._on_image, 1)
+        self.create_subscription(Image, "contact_response", self._on_response, 1)
         self.reference_client = self.create_client(SetContactReference, "set_contact_reference")
         self.pending_reference = None
         self.create_subscription(DiagnosticArray, "diagnostics", self._on_diagnostics, 1)
@@ -46,6 +47,12 @@ class ViewerNode(Node):
     def _on_image(self, message):
         try:
             self.model.accept_image(message)
+        except ValueError as error:
+            self.model.invalidate(str(error))
+
+    def _on_response(self, message):
+        try:
+            self.model.accept_response(message)
         except ValueError as error:
             self.model.invalidate(str(error))
 

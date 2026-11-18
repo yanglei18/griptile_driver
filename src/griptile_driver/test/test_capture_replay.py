@@ -3,6 +3,7 @@
 from dataclasses import replace
 import time
 
+import numpy as np
 import pytest
 import rclpy
 from rclpy.context import Context
@@ -187,6 +188,7 @@ def test_contact_capture_real_rows_and_session_bound_import(context):
     node = TactileNode(context=context, monotonic_ns=lambda: current[0],
                        parameter_overrides=[Parameter("sensor_id", value="pad_a")])
     node.contact.image_publisher = images = Collector()
+    node.contact.response_publisher = responses = Collector()
     node.contact.reference_publisher = references = Collector()
     first = measurement()
     index = 0
@@ -215,6 +217,9 @@ def test_contact_capture_real_rows_and_session_bound_import(context):
         initial = send(zero)
         assert (initial.height, initial.width, initial.step, initial.encoding) == (20, 20, 60, "rgb8")
         assert bytes(initial.data) == bytes(INVALID_RGB)*400
+        field = responses.messages[-1]
+        assert (field.header, field.encoding, field.is_bigendian, field.step) == (initial.header, "32FC1", 0, 80)
+        assert np.isnan(np.frombuffer(field.data, dtype="<f4")).all()
         assert references.messages[-1].phase == "unreferenced"
         assert call().success
         assert not call().success  # Concurrent clients cannot indefinitely restart a capture.
@@ -229,6 +234,11 @@ def test_contact_capture_real_rows_and_session_bound_import(context):
         image = send(loaded)
         assert image.header == node.contact.state.header
         assert pixel(image, 3, 4) == pixel(image, 3, 18) == STRONG_RGB
+        field = responses.messages[-1]
+        values = np.frombuffer(field.data, dtype="<f4").reshape(20, 20)
+        assert field.header == image.header
+        assert values[3, 4] == values[3, 18] == 4998.5  # retains amplitude above the RGB saturation limit
+        assert values[3, 5] == 0 and np.isnan(values[4, 3])
         assert bytes(send(zero).data) == bytes(last.data)
         args = dict(sensor_id=first.sensor_id, session_id=first.session_id, stream_epoch=first.stream_epoch,
                     baseline_adc=profile.baseline_adc, activation_threshold_adc=profile.activation_threshold_adc,

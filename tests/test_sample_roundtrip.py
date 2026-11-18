@@ -205,6 +205,9 @@ def test_recorded_reference_rebuilds_native_contact_image(tmp_path, monkeypatch)
     observer = rclpy.create_node("griptile_contact_roundtrip")
     reference_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
     refs, states, images, reconstructed = [], [], [], []
+    fields, replay_fields = [], []
+    observer.create_subscription(Image, NS + "/contact_response", fields.append, 5)
+    observer.create_subscription(Image, "/tactile/replay/contact_response", replay_fields.append, 5)
     observer.create_subscription(TactileGridState, NS + "/state", states.append,
                                  QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
     observer.create_subscription(ContactReference, NS + "/contact_reference", refs.append, reference_qos)
@@ -262,7 +265,14 @@ def test_recorded_reference_rebuilds_native_contact_image(tmp_path, monkeypatch)
                                     observer.count_subscribers(NS + "/contact_reference") >= 2),
                      "recorder not subscribed")
                 feed(pressed, lambda: two_touches(images[-1]), "asymmetric footprint is incorrect")
-                expected = bytes(images[-1].data)
+                pressed_image = images[-1]
+                expected = bytes(pressed_image.data)
+                until(observer, lambda: any(msg.header == pressed_image.header for msg in fields))
+                pressed_field = next(msg for msg in reversed(fields) if msg.header == pressed_image.header)
+                assert pressed_field.encoding == "32FC1" and pressed_field.step == 80
+                expected_field = bytes(pressed_field.data)
+                amplitudes = np.frombuffer(expected_field, dtype="<f4").reshape(20, 20)
+                assert (amplitudes[2, 5], amplitudes[15, 6]) == (4398.5, 398.5)
                 # Each pose spans several state refreshes on both timelines.
                 hold_until = time.monotonic() + .25
                 feed(pressed, lambda: time.monotonic() >= hold_until, "could not hold contact")
@@ -276,6 +286,7 @@ def test_recorded_reference_rebuilds_native_contact_image(tmp_path, monkeypatch)
             with running(["ros2", "bag", "play", str(bag), "--clock", "100", "--rate", "0.5",
                           "--delay", "0.5", "--disable-keyboard-controls"], tmp_path / "contact-play.log"):
                 until(observer, lambda: any(bytes(msg.data) == expected for msg in reconstructed))
+                until(observer, lambda: any(bytes(msg.data) == expected_field for msg in replay_fields))
                 reconstructed.clear()
                 until(observer, lambda: any(np.all(pixels(msg) == UNLOADED_RGB) for msg in reconstructed))
     finally:
