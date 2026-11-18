@@ -42,7 +42,9 @@ def bench(monkeypatch):
 
     def hold(total, signed, peak, active):
         source.total, source.signed, source.peak, source.active = total, signed, peak, active
-        dialog.capture_button.click()
+        button = dialog.repeat_button if dialog.trial and dialog.trial.stage == "done" else dialog.capture_button
+        assert button.isVisible()
+        button.click()
         assert dialog.capture is not None
         for _ in range(3):
             clock.now += 200_000_000
@@ -62,7 +64,8 @@ def test_verify_loading_release_recheck_and_export(bench, monkeypatch, tmp_path)
     assert "1/4" in dialog.guide.text()
     hold(3400., 3400., 1700., 2)
     assert dialog.trial.stage == "calibration"
-    assert not dialog.check_force.isEnabled()
+    assert not dialog.check_force.isEnabled() and not dialog.inputs.isVisible()
+    assert not dialog.live.isVisible() and not dialog.reset_button.isVisible()
     # The zero-response anchor can be retried on its own. Previous hold survives.
     hold(0., 0., 0., 0)
     assert dialog.trial.stage == "calibration"
@@ -72,6 +75,8 @@ def test_verify_loading_release_recheck_and_export(bench, monkeypatch, tmp_path)
     window.refresh()
     assert "5.500 N" in dialog.live.text() and "超出标定范围" in dialog.live.text()
     assert "色标已满" in dialog.live.text()
+    assert dialog.current_force.isVisible() and "5.5 N" in dialog.current_force.text()
+    assert not dialog.details.isVisible()
     hold(4600., -4600., 2300., 2)
     dialog.capture_button.click()
     for total in (300., 200., 50.):
@@ -85,7 +90,19 @@ def test_verify_loading_release_recheck_and_export(bench, monkeypatch, tmp_path)
     expected = contact_intensity_rgb(1700, 3000)
     assert tuple(report["holds"]["check_up"]["peak_rgb"]) == expected
     assert dialog.results.item(0, 4).data(QtCore.Qt.DecorationRole).getRgb()[:3] == expected
-    assert "与夹紧时反向" in dialog.summary.text()
+    assert "+0.6 N" in dialog.summary.text() and "0.1 N" in dialog.summary.text()
+    assert dialog.comparison.isVisible() and not dialog.details.isVisible()
+    assert all(card.isVisible() for card in dialog.readings.values())
+    assert dialog.readings["check_up"].value.text() == "总力 1.7 N"
+    assert dialog.readings["check_down"].value.text() == "总力 2.3 N"
+    assert "反向" in dialog.readings["check_down"].flags.text()
+    assert "波动" in dialog.readings["release"].flags.text()
+    shown = dialog.readings["check_up"].swatch.pixmap().toImage().pixelColor(0, 0)
+    assert shown.getRgb()[:3] == expected
+    assert not dialog.current_force.isVisible()
+    assert not dialog.repeat_button.isVisible() and not dialog.export_button.isVisible()
+    dialog.details_button.click()
+    assert dialog.results.isVisible() and dialog.export_button.isVisible()
     assert "波动" in dialog.results.item(2, 0).text()
     assert report["holds"]["release"]["stable"] is False
     assert report["holds"]["release"]["signed_spread_adc"] == 250.
@@ -113,6 +130,8 @@ def test_verify_loading_release_recheck_and_export(bench, monkeypatch, tmp_path)
     monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName", lambda *args: (str(path), "JSON"))
     dialog.export_button.click()
     assert json.loads(path.read_text()) == report
+    dialog.details_button.click()
+    assert not dialog.details.isVisible() and dialog.comparison.isVisible()
     # A different reference stops live estimates; the previous report remains exportable.
     source.context = replace(source.context, generation=2)
     window.refresh()
@@ -126,7 +145,9 @@ def test_wait_for_reference_partial_frames_cancel_and_resume(bench):
     context = source.context
     source.context = None
     window.refresh()
-    assert not dialog.capture_button.isEnabled() and dialog.zero_button.isVisible()
+    assert not dialog.capture_button.isVisible() and not dialog.zero_button.isVisible()
+    assert not dialog.inputs.isVisible() and not dialog.details_button.isVisible()
+    assert "接入" in dialog.guide.text()
     source.context = context
     source.fresh = False
     window.refresh()

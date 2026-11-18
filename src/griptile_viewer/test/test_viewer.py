@@ -127,11 +127,16 @@ def test_rgb_pairs_either_arrival_order_and_expires_without_receipt_clock_extens
     assert np.all(model.contact_pixels(120_000_000) == INVALID_RGB)
 
 
-def test_qt_native_rgb_png_and_diagnostic_modes(monkeypatch, tmp_path):
+@pytest.fixture
+def app(monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
-    from griptile_viewer.window import CONTACT_MODE, DELTA_MODE, RAW_MODE, QtGui, QtWidgets, ViewerWindow
+    from griptile_viewer.window import pg
+    return pg.mkQApp()
 
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+def test_qt_native_rgb_png_and_diagnostic_modes(app, tmp_path):
+    from griptile_viewer.window import CONTACT_MODE, DELTA_MODE, RAW_MODE, QtGui, ViewerWindow
+
     model = ArrayView(SENSOR)
     state = snapshot(Assembler(sensor_id=SENSOR), 1, START, (0, 2))
     model.accept(state, 0)
@@ -145,6 +150,7 @@ def test_qt_native_rgb_png_and_diagnostic_modes(monkeypatch, tmp_path):
     window = ViewerWindow(model, clock_ns=lambda: 0, request_reference=requests.append)
     window.show()
     app.processEvents()
+    window.details_button.click()
     model.select(2, 3)
     window.mode.setCurrentIndex(CONTACT_MODE)
     window.refresh()
@@ -173,6 +179,44 @@ def test_qt_native_rgb_png_and_diagnostic_modes(monkeypatch, tmp_path):
     assert window.mode.currentIndex() == CONTACT_MODE
     window.close()
     app.processEvents()
+
+
+def test_compact_contact_screen_and_reference_action_follow_source_state(app):
+    from griptile_viewer.window import RAW_MODE, SURFACE_MODE, ViewerWindow
+
+    model = ArrayView(SENSOR)
+    window = ViewerWindow(model, clock_ns=lambda: 0, request_reference=lambda *_: None)
+    window.show()
+    app.processEvents()
+    size = window.size()
+    assert window.load_button.isVisible() and window.scale.isVisible()
+    assert not window.reference_button.isVisible() and not window.ref_status.text()
+    assert not window.details.isVisible() and not window.map.getAxis("left").isVisible()
+    assert not window.marker.isVisible()
+    compact_height = window.map.height()
+    assert compact_height > window.height() * .75
+
+    model.accept(snapshot(Assembler(sensor_id=SENSOR), 1, START), 0)
+    window.refresh()
+    assert window.reference_button.isVisible() and window.reference_button.isEnabled()
+    model.accept_reference(profile_status())
+    window.refresh()
+    assert not window.reference_button.isVisible() and "就绪" in window.ref_status.text()
+
+    window.details_button.click()
+    app.processEvents()
+    assert all(widget.isVisible() for widget in (window.mode, window.curve, window.png_button,
+                                                  window.reference_button, window.cell_label))
+    assert window.marker.isVisible() and window.map.getAxis("left").isVisible()
+    window.mode.setCurrentIndex(RAW_MODE)
+    window.refresh()
+    assert not window.scale.isVisible()
+    window.details_button.click()
+    app.processEvents()
+    assert window.mode.currentIndex() == SURFACE_MODE and window.scale.isVisible()
+    assert not window.curve.isVisible() and not window.marker.isVisible()
+    assert window.size() == size and window.map.height() == compact_height
+    window.close()
 
 
 def response(state, amplitude, *, bigendian=False):
@@ -205,11 +249,9 @@ def test_response_matches_source_stamp_reference_and_freshness(bigendian):
     assert np.isnan(model.contact_response(150_000_001)).all()
 
 
-def test_continuous_mode_png_selection_coordinates_and_native_export(monkeypatch, tmp_path):
-    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+def test_continuous_mode_png_selection_coordinates_and_native_export(app, tmp_path):
     from griptile_viewer.window import CONTACT_MODE, SURFACE_MODE, QtCore, QtGui, QtWidgets, ViewerWindow
 
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     model = ArrayView(SENSOR)
     assembler = Assembler(sensor_id=SENSOR)
     state = snapshot(assembler, 1, START)

@@ -378,8 +378,12 @@ def test_known_load_window_uses_the_drivers_unclipped_samples(tmp_path, monkeypa
                 feed(delta, lambda: dialog.trial is not None and dialog.trial.stage == next_stage)
 
             assert window.mode.currentIndex() == SURFACE_MODE
-            feed(2200, lambda: total_is(4400) and dialog.capture_button.isEnabled())
-            dialog.capture_button.click()
+            assert dialog.summary.isVisible() and not dialog.results.isVisible()
+            assert dialog.readings["check_up"].isVisible() and dialog.readings["check_down"].isVisible()
+            dialog.details_button.click()
+            feed(2200, lambda: total_is(4400) and dialog.repeat_button.isEnabled())
+            assert dialog.repeat_button.isVisible()
+            dialog.repeat_button.click()
             feed(2200, lambda: len(dialog.last_report["extra_checks"]) == 1)
             destination = tmp_path / "known-load.json"
             monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName", lambda *a: (str(destination), ""))
