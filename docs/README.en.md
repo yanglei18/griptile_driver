@@ -43,11 +43,23 @@ The live window opens on a square **连续接触面（估算）** display with i
 
 ![Native and interpolated views of the same simulated ring and three broad ridges](contact-surface-comparison.png)
 
-The three RGB channels encode one tactile response per taxel. The same response always receives the same color across frames. The red endpoint defaults to 3000 noise-gated ADC counts. Set `contact_span_adc:=6000.0` to extend the range. The default `contact_direction:=both` accepts either sign of ADC change. Select `increase` or `decrease` when the pressure polarity is known. All subscribers share the driver's calibration. From a headless terminal with the gripper unloaded, request it with the command below.
+The three RGB channels encode one tactile response per taxel. The same response always receives the same color across frames. The red endpoint defaults to 3000 noise-gated ADC counts. Set `contact_span_adc:=6000.0` to extend the range. The default `contact_direction:=both` accepts either sign of ADC change. Select `increase` or `decrease` when the pressure polarity is known. All subscribers share the driver's unloaded reference. From a headless terminal with the gripper unloaded, request it with the command below.
 
 ```bash
 ros2 service call /tactile/sensor_0/set_contact_reference griptile_msgs/srv/SetContactReference '{}'
 ```
+
+### Match taxel colors under equal local pressure
+
+Open **阵元标定** in the live viewer and reuse the ready unloaded reference. Cover the entire 20×20 array with a uniform-pressure bladder or a fixture with independently established pressure uniformity. Keep the mounting and contact surface fixed. A cap rim, finger or total force reading alone cannot establish equal local pressure.
+
+1. Apply a lower uniform pressure, let it settle, click **采集第一档**, and hold for about one second. This determines a sensitivity factor for each taxel.
+2. Increase pressure across the face. Once steady, click **采集验证档**. This independent check requires at least a 25% higher median response and reports the spread across all 400 taxels before and after correction, plus the largest corrected deviation.
+3. Click **保存并启用** to adopt the validated result. With an unverified USB identity, **本次连接启用** applies it for the current connection. Saved gains can be reused with matching hardware, layout, response direction and unloaded reference. Reopen the dialog to disable, enable or remove them.
+
+No pressure values need to be entered. The corrected spatial coefficient of variation (standard deviation divided by mean) must be at most 10% and each corrected taxel must be within 20% of the median. The dialog identifies weak, saturated or unstable cells and allows retrying the check independently. A consistently uneven fixture can reproduce the same pressure pattern at both levels and bias the calibration.
+
+The factors adjust colors in both live contact views and the main peak indicator around the validated range. Raw ADC, ROS response and RGB topics, PNG exports and the force-gauge workflow retain the original scale. The viewer labels PNG exports **导出未均衡图** while correction is active. [Two-level validation on a simulated array](taxel-calibration.png)
 
 ### Check the display against a known load
 

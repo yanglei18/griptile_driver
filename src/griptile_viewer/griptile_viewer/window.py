@@ -14,7 +14,10 @@ from griptile_core.contact_image import (
     UNLOADED_RGB, amplitude_rgb, contact_surface_rgb, surface_contact_outline,
 )
 
+from griptile_core.equalization import apply_equalization
 from griptile_core.grid import ROWS, COLS
+from .equalization_store import EqualizationSettings
+from .equalization_dialog import EqualizationDialog
 from .load_dialog import LoadDialog
 from .serial_dialog import SerialDialog
 from .storage import load_reference, save_reference, save_snapshot
@@ -108,6 +111,8 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.request_reference = request_reference
         self.serial_control = serial_control
         self.serial_dialog = None
+        self.equalization = EqualizationSettings(model)
+        self.equalization_dialog = None
         self.last_receipt_wall_ns = time.monotonic_ns()
         self.last_message = None
         self.setWindowTitle(f"GripTile · 触觉显示 · {model.sensor_id}")
@@ -155,6 +160,11 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.serial_button.setVisible(not model.replay)
         self.serial_button.clicked.connect(self.open_serial_dialog)
         actions.addWidget(self.serial_button)
+        self.equalization_button = QtWidgets.QPushButton("阵元标定")
+        self.equalization_button.setToolTip("使用均匀载荷标定各触点的相对灵敏度")
+        self.equalization_button.setVisible(not model.replay)
+        self.equalization_button.clicked.connect(self.open_equalization_dialog)
+        actions.addWidget(self.equalization_button)
         self.reference_button = QtWidgets.QPushButton("采集无载参考")
         self.reference_button.setToolTip("保持夹爪无载，采集 3 秒")
         self.reference_button.clicked.connect(self.start_reference)
@@ -255,6 +265,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
         details_layout.addLayout(footer)
         layout.addWidget(self.details, stretch=2)
         self._format = None
+        self._contour_input = None
         self._surface_input = self._surface_span = self._surface_pixels = self._surface_thresholds = None
         self.contour_checkbox.toggled.connect(self.refresh)
         self.details_button.toggled.connect(self._show_details)
@@ -297,9 +308,21 @@ class ViewerWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage(str(error), 6000)
 
     def save_png(self, path):
-        if self.mode.currentIndex() in (CONTACT_MODE, SURFACE_MODE):
+        mode = self.mode.currentIndex()
+        if mode in (CONTACT_MODE, SURFACE_MODE):
             self.refresh()
-            pixels = self.image.image
+            if self.equalization.active is None:
+                pixels = self.image.image
+            else:
+                # PNG has always carried the original contact palette, including the
+                # driver's exact RGB on native-only streams. Keep this export stable.
+                now = self.clock_ns()
+                span = self.model.current_reference.span_adc
+                if mode == SURFACE_MODE:
+                    pixels = contact_surface_rgb(self.model.contact_response(now), span)
+                else:
+                    amplitude = self.model.contact_response(now, allow_rgb_fallback=True)
+                    pixels = self.model.contact_pixels(now) if amplitude is None else amplitude_rgb(amplitude, span)
             height, width = pixels.shape[:2]
             image = QtGui.QImage(pixels.data, width, height, pixels.strides[0], QtGui.QImage.Format_RGB888)
         else:
@@ -320,6 +343,16 @@ class ViewerWindow(QtWidgets.QMainWindow):
         if self.serial_dialog is None:
             self.serial_dialog = SerialDialog(self, self.serial_control)
         self.serial_dialog.open_settings()
+
+    def open_equalization_dialog(self):
+        if self.model.replay:
+            return
+        if self.equalization_dialog is None:
+            self.equalization_dialog = EqualizationDialog(self)
+        self.equalization_dialog.show()
+        self.equalization_dialog.raise_()
+        self.equalization_dialog.activateWindow()
+        self.equalization_dialog.refresh()
 
     def open_load_dialog(self):
         if self.load_dialog is None:
@@ -367,20 +400,22 @@ class ViewerWindow(QtWidgets.QMainWindow):
             label = f"{value:g} {'ΔADC' if delta else 'ADC'}" if np.isfinite(value) else "无有效值"
             self.statusBar().showMessage(f"行 {cell[0]}  列 {cell[1]}    {label}", 1500)
 
-    def _surface(self, amplitude, span, thresholds):
+    def _surface(self, amplitude, span, thresholds, measured):
         changed = not np.array_equal(self._surface_input, amplitude, equal_nan=True)
         if changed or self._surface_span != span:
             self._surface_pixels = contact_surface_rgb(amplitude, span)
         if thresholds is None:
             if self._surface_thresholds is not None:
                 self.contour_image.clear()
-        elif changed or not np.array_equal(self._surface_thresholds, thresholds, equal_nan=True):
-            edge = surface_contact_outline(amplitude, thresholds)
+        elif (not np.array_equal(self._contour_input, measured, equal_nan=True)
+              or not np.array_equal(self._surface_thresholds, thresholds, equal_nan=True)):
+            edge = surface_contact_outline(measured, thresholds)
             if edge.any():
                 self.contour_image.setImage(edge.astype(np.uint8), autoLevels=False, levels=(0, 1))
             else:
                 self.contour_image.clear()
         self.contour_image.setVisible(thresholds is not None and self.contour_image.image is not None)
+        self._contour_input = measured if thresholds is not None else None
         self._surface_input, self._surface_span, self._surface_thresholds = amplitude, span, thresholds
         return self._surface_pixels
 
@@ -388,6 +423,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
         now = self.clock_ns()
         model = self.model
         model.track_clock(now)
+        self.equalization.sync()
         message = model.message
         wall_ns = time.monotonic_ns()
         if message is not self.last_message:
@@ -405,14 +441,17 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.span.setVisible(delta)
         self.span_label.setVisible(delta)
         source_colors = False
+        profile = self.equalization.active if contact else None
+        self.png_button.setToolTip("保存均衡前的原始色标图" if profile is not None else "")
+        self.png_button.setText("导出未均衡图" if profile is not None
+                                else "导出估算图" if surface else "导出图像")
         mode_changed = self._format != mode
         if mode_changed:
             self.image.setLookupTable({RAW_MODE: RAW, DELTA_MODE: DELTA}.get(mode))
-            self.png_button.setText("导出估算图" if surface else "导出图像")
             self._format = mode
         if contact:
             thresholds = None
-            if surface and self.contour_checkbox.isChecked():
+            if profile is not None or (surface and self.contour_checkbox.isChecked()):
                 amplitude, thresholds = model.contact_surface_inputs(now)
             elif surface:
                 amplitude = model.contact_response(now)
@@ -423,7 +462,17 @@ class ViewerWindow(QtWidgets.QMainWindow):
             if amplitude is not None:
                 status = model.current_reference
                 span = status.span_adc if model.reference is not None else DEFAULT_CONTACT_SPAN
-                frame = self._surface(amplitude, span, thresholds) if surface else amplitude_rgb(amplitude, span)
+                measured = amplitude
+                if profile is not None:
+                    # A ready-to-ready reference switch may have a mixed grid. Only
+                    # color rows known to have been sampled after the matched reference.
+                    supported = False if thresholds is None else np.isfinite(thresholds)
+                    amplitude = apply_equalization(np.where(supported, measured, np.nan), profile)
+                if surface:
+                    outline_thresholds = thresholds if self.contour_checkbox.isChecked() else None
+                    frame = self._surface(amplitude, span, outline_thresholds, measured)
+                else:
+                    frame = amplitude_rgb(amplitude, span)
                 usable = np.isfinite(amplitude)
                 active = amplitude > 0
                 self.peak.setText(_peak_label(amplitude, usable, span))
@@ -496,6 +545,8 @@ class ViewerWindow(QtWidgets.QMainWindow):
             ref_info = status.reason
         else:
             text = "待采无载参考" if valid.any() else ""
+        if profile is not None:
+            text = "阵元已均衡" if phase == "ready" else text
         self.ref_status.setText(text)
         can_collect = self.request_reference is not None and bool(valid.any()) and phase != "collecting"
         self.reference_button.setEnabled(can_collect)
@@ -503,6 +554,8 @@ class ViewerWindow(QtWidgets.QMainWindow):
         reason = message.reason if message is not None and not valid.any() else ""
         self.legend.setText("    ".join(filter(None, (model.sensor_id, summary, ref_info, reason, model.diagnostic,
                                                     model.rejection, model.service_error))))
+        if self.equalization_dialog is not None:
+            self.equalization_dialog.refresh()
         if self.load_dialog is not None:
             self.load_dialog.refresh()
         if self.serial_dialog is not None:

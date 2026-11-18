@@ -1,7 +1,7 @@
 """Time-aware view of rolling source snapshots. No Qt or ROS dependency."""
 
 from collections import deque
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -12,6 +12,14 @@ from griptile_core.identity import validate_sensor_id
 from griptile_core.protocol import PROTOCOL_ID
 
 from .load_capture import LoadContext, LoadObservation
+
+
+@dataclass(frozen=True)
+class UniformObservation:
+    context: LoadContext
+    row_stamps: tuple
+    source_now_ns: int
+    raw_adc: np.ndarray
 
 
 class ArrayView:
@@ -62,9 +70,14 @@ class ArrayView:
         self.last_clock = clock_ns
 
     def accept_info(self, info):
-        if (info.sensor_id == self.sensor_id and info.layout_id == LAYOUT_ID
-                and info.protocol_id == PROTOCOL_ID and info.unit == "adc_counts"):
+        if info.sensor_id != self.sensor_id or (info.session_id, info.stream_epoch) in self.retired:
+            return
+        if info.layout_id == LAYOUT_ID and info.protocol_id == PROTOCOL_ID and info.unit == "adc_counts":
             self.info = info
+        elif (info.session_id, info.stream_epoch) == self.identity:
+            # Superseded metadata must not authorize a stored calibration on
+            # an acquisition that now reports an incompatible layout/protocol.
+            self.info = None
 
     @property
     def current_reference(self):
@@ -115,6 +128,29 @@ class ArrayView:
                 and message.time_valid and self._load_reference is not None):
             return self._load_reference
         return None
+
+    @property
+    def equalization_context(self):
+        """The live reference and sensor info must identify the same acquisition."""
+        context = self.load_context
+        info = self.info
+        if (self.replay or context is None or info is None or not getattr(info, "connected", True)
+                or (info.session_id, info.stream_epoch) != self.identity
+                or (context.session_id, context.stream_epoch) != self.identity
+                or context.frame_id != self.message.header.frame_id
+                or info.hardware_id != context.hardware_id):
+            return None
+        return context
+
+    def uniform_observation(self, clock_ns):
+        context = self.equalization_context
+        state = self.message
+        if (context is None or not all(self.reference.valid_mask) or not self.mask(clock_ns).all()
+                or not self._rows_after_reference(state, context).all()):
+            return None
+        source_now = int(state.snapshot_monotonic_ns) + max(0, clock_ns - self.receive_clock)
+        return UniformObservation(context, tuple(map(int, state.row_monotonic_ns)), source_now,
+                                  np.asarray(state.adc, dtype=np.uint16).reshape(SHAPE).copy())
 
     @staticmethod
     def _key(header):

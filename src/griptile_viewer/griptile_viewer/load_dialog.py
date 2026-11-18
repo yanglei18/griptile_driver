@@ -107,6 +107,10 @@ class LoadDialog(QtWidgets.QDialog):
         self.guide.setObjectName("loadGuide")
         self.guide.setWordWrap(True)
         layout.addWidget(self.guide)
+        self.signal_note = QtWidgets.QLabel("验证颜色与估算力使用均衡前的测量值")
+        self.signal_note.setWordWrap(True)
+        self.signal_note.hide()
+        layout.addWidget(self.signal_note)
         self.inputs = QtWidgets.QWidget()
         form = QtWidgets.QFormLayout(self.inputs)
         form.setContentsMargins(0, 0, 0, 0)
@@ -282,6 +286,7 @@ class LoadDialog(QtWidgets.QDialog):
             self.feedback.setText("连接或无载参考已变更，请重新开始载荷验证。")
         if not self.isVisible():
             return
+        self.signal_note.setVisible(self.viewer.equalization.active is not None)
         obs = None if model.replay else model.load_observation(self.viewer.clock_ns())
         if self.capture is not None:
             try:

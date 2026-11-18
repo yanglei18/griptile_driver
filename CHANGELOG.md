@@ -14,3 +14,4 @@
 - Use a light blue-gray idle surface and a gradual low-response color ramp in the contact images, viewer and exports.
 - Present the live contact surface in a square display with a shared intensity scale, measured peak readout and direct access to serial settings.
 - Outline measured contact boundaries in the continuous viewer using the sensor’s per-cell unloaded thresholds, with a display toggle in Details.
+- Add two-level full-face uniform-pressure calibration for individual taxel sensitivity, with independent validation, hardware and reference binding, and optional correction in both live contact views.

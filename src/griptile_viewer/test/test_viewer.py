@@ -20,9 +20,11 @@ SENSOR = "grip_pad"
 START = 9_000_000_000
 
 
-def snapshot(assembler, n, t, rows=range(20), *, epoch=1, offset=0):
+def snapshot(assembler, n, t, rows=range(20), *, epoch=1, offset=0, first_packet_index=None):
+    if first_packet_index is None:
+        first_packet_index = (n - 1) * len(rows)
     packet = Batch(sensor_id=SENSOR, session_id="fixture", stream_epoch=epoch,
-                   sequence=n, first_packet_index=(n - 1) * len(rows), host_realtime_ns=t + 10**12,
+                   sequence=n, first_packet_index=first_packet_index, host_realtime_ns=t + 10**12,
                    host_monotonic_ns=t, connected=True, time_valid=True,
                    blocks=tuple(Block(row, tuple(row * 20 + c + offset for c in range(20))) for row in rows))
     assembler.apply(packet)
@@ -565,3 +567,99 @@ def test_incomplete_force_data_never_becomes_zero_and_disconnect_retires_context
     fourth = snapshot(assembler, 4, START + 3)
     model.accept(fourth, 3)
     assert model.load_context is None
+
+
+def test_live_equalization_changes_only_displayed_contact_strength(open_window, tmp_path):
+    from griptile_core.equalization import EqualizationProfile, apply_equalization
+    from griptile_viewer.equalization_store import EqualizationSettings
+    from griptile_viewer.window import CONTACT_MODE, RAW_MODE, SURFACE_MODE, QtGui
+
+    model = ArrayView(SENSOR)
+    assembler = Assembler(sensor_id=SENSOR)
+    first = snapshot(assembler, 1, START)
+    status = profile_status()
+    status.header, status.direction = first.header, "both"
+    model.accept_info(info())
+    model.accept(first, 0)
+    model.accept_reference(status)
+    assert model.uniform_observation(0) is None  # Pre-reference rows.
+    now = 10_000_000
+    pressed = snapshot(assembler, 2, START + now, offset=123)
+    model.accept(pressed, now)
+    sample = model.uniform_observation(now)
+    np.testing.assert_array_equal(sample.raw_adc.ravel(), pressed.adc)
+    assert model.uniform_observation(now + pressed.max_age_ns + 1) is None
+
+    amplitude = np.zeros((20, 20), dtype=np.float32)
+    amplitude[5:10, 5:10:2] = 300
+    amplitude[5:10, 6:10:2] = 150
+    model.accept_response(response(pressed, amplitude))
+    load = model.load_observation(now)
+    window = open_window(model, clock_ns=lambda: now)
+    window.equalization = EqualizationSettings(model, tmp_path)
+    window.equalization_button.click()
+    assert window.equalization_dialog.isVisible()
+    window.refresh()
+    contour = window.contour_image.image.copy()
+    profile = EqualizationProfile("both", (100., 200.) * 200, (150., 300.) * 200)
+    window.equalization.adopt(profile, sample.context)
+    corrected = apply_equalization(amplitude, profile)
+    for mode, render in ((SURFACE_MODE, contact_surface_rgb), (CONTACT_MODE, amplitude_rgb)):
+        window.mode.setCurrentIndex(mode)
+        window.refresh()
+        np.testing.assert_array_equal(window.image.image, render(corrected, status.span_adc))
+        assert "8%" in window.peak.text() and "均衡" in window.ref_status.text()
+        if mode == SURFACE_MODE:
+            np.testing.assert_array_equal(window.contour_image.image, contour)
+        path = tmp_path / f"original-{mode}.png"
+        window.save_png(path)
+        saved = QtGui.QImage(str(path)).convertToFormat(QtGui.QImage.Format_RGB888)
+        ptr = saved.constBits()
+        ptr.setsize(saved.byteCount())
+        rows = np.frombuffer(ptr, dtype=np.uint8).reshape(saved.height(), saved.bytesPerLine())
+        np.testing.assert_array_equal(rows[:, :3 * saved.width()].reshape(saved.height(), saved.width(), 3),
+                                      render(amplitude, status.span_adc))
+    assert model.load_observation(now) == load
+    np.testing.assert_array_equal(model.contact_response(now), amplitude)
+    window.mode.setCurrentIndex(RAW_MODE)
+    window.refresh()
+    np.testing.assert_array_equal(window.image.image.ravel(), pressed.adc)
+    window.mode.setCurrentIndex(CONTACT_MODE)
+    # A ready-to-ready event may replay the same reference while the latest
+    # rolling scan still includes older rows. Only post-event rows may use gains.
+    restored = profile_status()
+    restored.header, restored.direction = pressed.header, "both"
+    model.accept_reference(restored)
+    now += 10_000_000
+    mixed = snapshot(assembler, 3, START + now, rows=(2,), first_packet_index=40)
+    model.accept(mixed, now)
+    model.accept_response(response(mixed, amplitude))
+    window.refresh()
+    assert window.equalization.active == profile
+    expected = np.full((20, 20), np.nan, dtype=np.float32)
+    expected[2] = corrected[2]
+    np.testing.assert_array_equal(window.image.image, amplitude_rgb(expected, status.span_adc))
+    assert model.uniform_observation(now) is None
+    model.accept_info(info(hardware_id="replacement"))
+    window.refresh()
+    assert window.equalization.active is None
+    assert window.image.image.shape == (20, 20, 3)
+    assert np.all(window.image.image == INVALID_RGB)
+
+
+def test_only_live_matching_metadata_allows_spatial_calibration():
+    for replay in (True, False):
+        model = ArrayView(SENSOR, replay=replay)
+        state = snapshot(Assembler(sensor_id=SENSOR), 1, START)
+        model.accept(state, 0)
+        status = profile_status()
+        status.header, status.direction = state.header, "both"
+        model.accept_reference(status)
+        assert model.equalization_context is None  # Missing trusted source metadata.
+        sensor = info()
+        model.accept_info(sensor)
+        assert (model.equalization_context is None) == replay
+        wrong = info()
+        wrong.protocol_id = "previous protocol"
+        model.accept_info(wrong)
+        assert model.equalization_context is None
