@@ -27,11 +27,13 @@ source install/setup.bash
 python3 examples/demo.py
 ```
 
-使用夹爪时，把下面的端口换成操作系统中这块阵列对应的路径。建议选用 `/dev/serial/by-id/` 中稳定的设备链接。默认波特率为 115200。同一块板由一个驱动进程打开，多个应用可订阅它的话题。
+使用夹爪时，可以直接启动实时窗口。
 
 ```bash
-ros2 launch griptile_driver sensor.launch.py port:=/dev/ttyUSB0 gui:=true
+ros2 launch griptile_driver sensor.launch.py gui:=true
 ```
+
+点击主窗口的「串口设置」，选择采集主机上的阵列或输入设备路径，核对波特率后点「连接」。默认波特率为 115200，Linux 上优先显示 `/dev/serial/by-id/` 中的稳定设备名。接入后可点「刷新」，串口打开后界面会继续等待有效阵列数据。串口设置支持切换和断开，切换会结束当前采集会话。也可以通过启动参数 `port:=/dev/ttyUSB0 baudrate:=115200` 指定初始配置。多个查看器可共享同一采集后台。[串口设置窗口](docs/serial-settings.png)
 
 窗口默认选择「连续接触面（估算）」。让夹爪张开、感应面保持无载，点击一次「采集无载参考（3 秒）」，等有效单元变白后即可接触物体。每次建立参考的是驱动，同一传感器的所有窗口和 ROS 图像订阅者共享该结果。
 
@@ -86,6 +88,8 @@ ros2 service call /tactile/sensor_0/set_contact_reference griptile_msgs/srv/SetC
 | `contact_response` | `sensor_msgs/msg/Image` | 与原生接触图共用源时间，20×20、`32FC1`。值为去噪后的 ADC 变化幅值，0 为未触发，NaN 为缺测或无参考，保留超过显示量程的幅值 |
 | `contact_reference` | `griptile_msgs/msg/ContactReference` | 参考采集进度、设备和会话、就绪后的逐点基线及阈值、色域和极性。支持晚加入的订阅者 |
 | `heatmap` | `sensor_msgs/msg/Image` | 可选原始 ADC 彩色预览，通过 `publish_heatmap:=true` 启用 |
+
+实时节点提供 `manage_serial` 服务（`griptile_msgs/srv/ManageSerial`）。`refresh` 返回后台的设备列表、当前配置和版本标识。用 `connect` 或 `disconnect` 更改配置时，传回最近一次读取的 `expected_revision`。已打开串口和已收到有效行是两种不同状态。
 
 每行 44 字节，由帧头 `A5 5A`、一个大端 16 位行号和 20 个大端 16 位 ADC 值组成。协议无已知校验和、硬件时间戳或硬件序号。源时间来自串口读取完成的主机时钟。矩阵由先后收到的行组成，默认超过 100 ms 的行会标记过期。处理算法应同时读取 `adc` 和 `valid_mask`，零本身是合法读数。
 

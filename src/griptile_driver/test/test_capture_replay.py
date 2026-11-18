@@ -304,3 +304,81 @@ def test_replay_keeps_reference_source_order_at_pause_and_rewind(context):
         assert bytes(images.messages[-1].data) == bytes(INVALID_RGB)*400
     finally:
         replay.destroy_node()
+
+
+def test_serial_changes_keep_valid_references_only_for_the_current_connection(context, monkeypatch):
+    from griptile_core.display_response import ReferenceProfile
+    from griptile_msgs.srv import ManageSerial
+    from griptile_driver import node as live
+    import uuid
+
+    class Worker:
+        def __init__(self, **settings):
+            self.session_id = str(uuid.uuid4())
+            self.running = self.connected = False
+            self.stoppable = True
+            self.events = []
+
+        def start(self):
+            self.running = self.connected = True
+
+        def drain(self, limit):
+            batch = self.events[:limit]
+            del self.events[:limit]
+            return batch
+
+        def identity_for_epoch(self, _epoch):
+            return "test-serial"
+
+        def stop(self, timeout):
+            if self.stoppable:
+                self.running = self.connected = False
+            return self.stoppable
+
+    monkeypatch.setattr(live, "available_ports", lambda: ["/dev/serial-A", "/dev/serial-B"])
+    monkeypatch.setattr(live, "validate_port", lambda value: None)
+    stamp = measurement().host_monotonic_ns
+    node = TactileNode(context=context, source_factory=Worker, monotonic_ns=lambda: stamp)
+    def command(action, revision="", port="", baudrate=115200):
+        req = ManageSerial.Request(action=action, port=port, baudrate=baudrate, expected_revision=revision)
+        return node.manage_serial(req, ManageSerial.Response())
+
+    node.contact.reference_publisher = profiles = Collector()
+    try:
+        idle = command("refresh")
+        assert idle.success and idle.state == "idle" and not idle.session_id
+        assert list(idle.ports) == ["/dev/serial-A", "/dev/serial-B"]
+        a = command("connect", idle.revision, idle.ports[0])
+        old = node.source
+        assert a.success and a.revision != idle.revision and a.session_id == old.session_id
+        assert not command("disconnect", idle.revision).success
+        old.events.append(replace(measurement(), sensor_id="sensor_0", session_id=old.session_id))
+        node.drain_samples()
+        node.publish_state()
+        profile = ReferenceProfile([100.0] * 400, [3.0] * 400, [True] * 400)
+        node.contact.processor.load_reference(profile, node.contact.identity, stamp)
+        node.publish_state()
+        assert profiles.messages[-1].phase == "ready"
+        same = command("connect", a.revision, a.port)
+        assert same.success and same.revision == a.revision and node.source is old
+        assert profiles.messages[-1].phase == "ready"
+
+        old.stoppable = False
+        assert not command("connect", a.revision, idle.ports[1]).success
+        assert node.source is old and node._last_info.port == a.port
+        old.stoppable = True
+        b = command("connect", a.revision, idle.ports[1], 57600)
+        assert b.success and not old.running and b.session_id != a.session_id
+        assert b.baudrate == 57600 and node._last_info.port == b.port
+        assert not any(node.contact.state.valid_mask) and profiles.messages[-1].phase == "unreferenced"
+        # A terminal worker must be replaceable using the same device settings.
+        node.source.running = node.source.connected = False
+        assert command("refresh").state == "error"
+        retried = command("connect", b.revision, b.port, b.baudrate)
+        assert retried.success and retried.session_id != b.session_id and retried.revision != b.revision
+        stopped = command("disconnect", retried.revision)
+        assert stopped.success and not stopped.port and not stopped.session_id and stopped.state == "idle"
+        assert command("disconnect", stopped.revision).revision == stopped.revision
+        assert not command("connect", stopped.revision, b.port, 0).success
+    finally:
+        node.destroy_node()

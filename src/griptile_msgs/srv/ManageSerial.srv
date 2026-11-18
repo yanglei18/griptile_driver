@@ -1,0 +1,17 @@
+# refresh lists the driver's local devices without opening them. Mutations must
+# match the revision last observed by the caller. Identical live settings keep
+# the same acquisition session and unloaded reference.
+string action
+string port
+uint32 baudrate
+string expected_revision
+---
+bool success
+string message
+string revision
+string[] ports
+string port
+uint32 baudrate
+# idle, opening, connected or error. An open port can still have no valid rows.
+string state
+string session_id

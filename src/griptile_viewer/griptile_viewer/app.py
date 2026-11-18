@@ -8,7 +8,7 @@ import time
 import rclpy
 from diagnostic_msgs.msg import DiagnosticArray
 from griptile_msgs.msg import ContactReference, SensorInfo, TactileGridState
-from griptile_msgs.srv import SetContactReference
+from griptile_msgs.srv import ManageSerial, SetContactReference
 from sensor_msgs.msg import Image
 from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from rclpy.node import Node
@@ -16,6 +16,7 @@ from rclpy.signals import SignalHandlerOptions
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 
 from .model import ArrayView
+from .serial_client import SerialControl
 from .window import QtCore, QtWidgets, ViewerWindow
 
 
@@ -26,6 +27,8 @@ class ViewerNode(Node):
         replay = self.get_parameter("use_sim_time").value
         self.model = ArrayView(sensor_id, replay=replay)
         self.view_clock = (lambda: self.get_clock().now().nanoseconds) if replay else time.monotonic_ns
+        self.serial_control = None if replay else SerialControl(
+            self.create_client(ManageSerial, "manage_serial"), ManageSerial.Request, self.model, self.view_clock)
         self.create_subscription(TactileGridState, "state", self._on_state,
                                  QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
         metadata_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
@@ -122,7 +125,7 @@ def main(args=None):
         executor = SingleThreadedExecutor()
         cleanup.callback(executor.shutdown)
         executor.add_node(node)
-        window = ViewerWindow(node.model, node.view_clock, node.request_reference)
+        window = ViewerWindow(node.model, node.view_clock, node.request_reference, serial_control=node.serial_control)
         window.show()
         ros_timer = QtCore.QTimer()
 

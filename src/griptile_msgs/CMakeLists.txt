@@ -7,6 +7,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/SensorInfo.msg"
   "msg/ContactReference.msg"
   "srv/SetContactReference.srv"
+  "srv/ManageSerial.srv"
   "msg/TactileRow44.msg"
   "msg/TactileRow44Array.msg"
   "msg/TactileGridState.msg"

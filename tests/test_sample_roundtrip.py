@@ -400,3 +400,116 @@ def test_known_load_window_uses_the_drivers_unclipped_samples(tmp_path, monkeypa
         node.destroy_node()
         rclpy.shutdown()
         os.close(master)
+
+
+def test_serial_controls_switch_live_ports_and_clear_the_reference(tmp_path, monkeypatch):
+    """Configure an initially idle installed driver from Qt, using two distinct PTYs."""
+    import termios
+    from griptile_viewer.app import ViewerNode
+    from griptile_viewer.window import QtWidgets, ViewerWindow
+
+    monkeypatch.setenv("ROS_DOMAIN_ID", str(138 + os.getpid() % 15))
+    monkeypatch.setenv("ROS_AUTOMATIC_DISCOVERY_RANGE", "LOCALHOST")
+    monkeypatch.setenv("ROS_LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    with contextlib.ExitStack() as cleanup:
+        def make_array(value):
+            master, slave = os.openpty()
+            cleanup.callback(os.close, master)
+            port = os.ttyname(slave)
+            os.close(slave)
+            os.set_blocking(master, False)
+            scan = b"".join(PACKET.pack(b"\xa5\x5a", row, *([value] * 20)) for row in range(20))
+            return port, master, scan
+
+        first, master_a, scan_a = make_array(12345)
+        second, master_b, scan_b = make_array(23456)
+        cleanup.enter_context(running(["ros2", "launch", "griptile_driver", "sensor.launch.py"],
+                                      tmp_path / "serial-settings.log"))
+        rclpy.init(args=["--ros-args", "-r", "__ns:=" + NS])
+        cleanup.callback(rclpy.shutdown)
+        node = ViewerNode()
+        cleanup.callback(node.destroy_node)
+        window = ViewerWindow(node.model, node.view_clock, node.request_reference,
+                              serial_control=node.serial_control)
+        cleanup.callback(window.close)
+        window.show()
+        window.serial_button.click()
+        dialog = window.serial_dialog
+        assert dialog.isVisible()
+
+        def wait_for(description, predicate, master=None, scan=b""):
+            deadline = time.monotonic() + 12
+            next_update = 0.
+            pending = b""
+            while time.monotonic() < deadline:
+                rclpy.spin_once(node, timeout_sec=.002)
+                if time.monotonic() < next_update:
+                    continue
+                next_update = time.monotonic() + .02
+                if master is not None:
+                    pending = pending or scan
+                    try:
+                        pending = pending[os.write(master, pending):]
+                    except BlockingIOError:
+                        pass
+                app.processEvents()
+                window.refresh()
+                if predicate():
+                    return
+            raise AssertionError(f"{description}: {dialog.status_label.text()}, {window.status.text()}")
+
+        def active_port(path):
+            info = node.model.info
+            return info is not None and info.connected and info.port == path
+
+        def all_cells(value):
+            state = node.model.message
+            return (state is not None and state.connected and all(state.valid_mask)
+                    and list(state.adc) == [value] * 400)
+
+        def select_port(path, baudrate):
+            dialog.port.setEditText(path)
+            dialog.baudrate.setCurrentText(str(baudrate))
+            wait_for("connect action available", dialog.connect_button.isEnabled)
+            dialog.connect_button.click()
+            wait_for("serial port opened", lambda: active_port(path))
+
+        wait_for("empty live backend", lambda: node.model.message is not None and not node.model.message.connected)
+        assert dialog.baudrate.currentText() == "115200"
+        select_port(first, 115200)
+        assert termios.tcgetattr(master_a)[4:6] == [termios.B115200] * 2
+        wait_for("open port waiting for its first row", lambda: node.serial_control.status.state == "waiting")
+        assert not node.model.mask(node.view_clock()).any()
+        wait_for("first array", lambda: all_cells(12345) and window.reference_button.isEnabled(),
+                 master_a, scan_a)
+        assert node.serial_control.status.state == "streaming"
+        first_id = node.model.identity
+        window.reference_button.click()
+        wait_for("first array zero", lambda: node.model.load_observation(node.view_clock()) is not None,
+                 master_a, scan_a)
+
+        dialog.port.setEditText(str(tmp_path / "missing-port"))
+        assert dialog.connect_button.isEnabled()
+        dialog.connect_button.click()
+        wait_for("invalid port reported", lambda: bool(node.serial_control.error), master_a, scan_a)
+        assert active_port(first) and node.model.identity == first_id and node.model.reference is not None
+
+        select_port(second, 57600)
+        wait_for("second array", lambda: all_cells(23456), master_b, scan_b)
+        assert termios.tcgetattr(master_b)[4:6] == [termios.B57600] * 2
+        assert node.model.identity != first_id and node.model.reference is None
+        assert node.model.load_observation(node.view_clock()) is None
+        os.close(os.open(first, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK))
+        second_id = node.model.identity
+
+        wait_for("disconnect action available", dialog.disconnect_button.isEnabled)
+        dialog.disconnect_button.click()
+        wait_for("array disconnected", lambda: not node.model.message.connected
+                 and not node.model.mask(node.view_clock()).any())
+        os.close(os.open(second, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK))
+        select_port(first, 115200)
+        wait_for("first array reconnected", lambda: all_cells(12345), master_a, scan_a)
+        assert node.model.identity not in (first_id, second_id)
+        assert node.model.reference is None

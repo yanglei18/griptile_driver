@@ -1,4 +1,4 @@
-"""Launch the serial driver and optionally a read-only matrix viewer."""
+"""Launch the serial driver and optional control and visualization window."""
 
 from griptile_driver import contact_launch
 from launch import LaunchDescription

@@ -23,11 +23,13 @@ Source both setup files in each new terminal. Run the full driver and viewer on 
 python3 examples/demo.py
 ```
 
-For a real sensor, substitute its serial path below. A stable symlink under `/dev/serial/by-id/` is preferable when available. Default baud rate is 115200. The driver opens only the supplied port. Omit `gui:=true` for headless acquisition. On a headless machine, use `--from-paths src/griptile_{core,msgs,driver}` for rosdep and build with `colcon build --base-paths src --packages-up-to griptile_driver`.
+To use a physical array, launch the driver and viewer, open **串口设置** (Serial settings), choose a device on the acquisition host or type its path, and click **连接** (Connect). The default baud rate is 115200. The dialog lists Linux by-id aliases when available and distinguishes an open port from a sensor streaming valid data. [Serial settings window](serial-settings.png)
 
 ```bash
-ros2 launch griptile_driver sensor.launch.py port:=/dev/ttyUSB0 gui:=true
+ros2 launch griptile_driver sensor.launch.py gui:=true
 ```
+
+The dialog can refresh the list, switch ports and disconnect. Changing connections starts a new acquisition session. You can also select a port at startup with `port:=/dev/ttyUSB0 baudrate:=115200`. Omit `gui:=true` for headless acquisition. On a headless installation use `--from-paths src/griptile_{core,msgs,driver}` with rosdep and build with `colcon build --base-paths src --packages-up-to griptile_driver`.
 
 Expand **详情** for view selection, cell traces and exports. The array uses row and column addresses 0–19, with row zero at the top and column zero at the left. Open the gripper, unload the surface and click the three-second reference button. Once the reference is ready, white pixels indicate measured cells with no detected contact. Increasing contact strength follows a fixed blue, cyan, green, yellow, orange and red scale. Gray pixels indicate missing reference or stale data. The demo supplies unloaded samples until the driver confirms the reference, then cycles through a ring, release and two separate contact patches.
 
@@ -72,6 +74,8 @@ The default namespace is `/tactile/sensor_0`. Set a different logical ID with `s
 | `contact_response` | `sensor_msgs/msg/Image` | Native 20×20 `32FC1` noise-gated ADC amplitudes, paired to the RGB image by its acquisition header. Zero indicates inactive, NaN indicates unknown. Values above the display range are retained |
 | `contact_reference` | `griptile_msgs/msg/ContactReference` | Reference progress, session and device binding, ready coefficients, direction and display range. Transient-local |
 | `heatmap` | `sensor_msgs/msg/Image` | Optional raw ADC color preview. Enable with `publish_heatmap:=true` |
+
+The live driver exposes the `manage_serial` service (`griptile_msgs/srv/ManageSerial`). Use `refresh` to read the acquisition host’s port inventory, current configuration and revision. Send the observed `expected_revision` with a subsequent `connect` or `disconnect` request.
 
 A 44-byte packet has a two-byte `A5 5A` header, a big-endian uint16 row index and twenty big-endian uint16 ADC values. The protocol has no documented checksum, device timestamp or hardware sequence counter. Samples use host read-completion times. A grid combines sequential row updates and uses a 100 ms default freshness limit. Read the validity mask alongside ADC values. Zero can be a valid measurement.
 

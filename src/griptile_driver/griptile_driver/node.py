@@ -20,16 +20,21 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image
 from griptile_msgs.msg import SensorInfo, TactileRow44Array, TactileGridState
+from griptile_msgs.srv import ManageSerial
 
 from griptile_core.assembler import Assembler
 from griptile_core.grid import CELL_COUNT, COLS, LAYOUT_ID, ROWS, SCHEMA_VERSION
 from griptile_core.identity import validate_sensor_id
 from griptile_core.protocol import PROTOCOL_ID
+from griptile_core.serial_ports import available_ports, validate_port
 from griptile_core.serial_source import Batch, CLOCK_DOMAIN, MAX_READ_BYTES, SerialWorker, TIMING_SOURCE
 
 from .contact import ContactImaging
 from .lifecycle import shutdown_ros
 from .ros_messages import heatmap_message, sample_message, state_message
+
+
+_DATA_TIMEOUTS = ("no_data_timeout", "no_valid_packets")
 
 
 class TactileNode(Node):
@@ -89,13 +94,13 @@ class TactileNode(Node):
         )
         self.diagnostic_publisher = self.create_publisher(DiagnosticArray, "diagnostics", 1)
         self.heatmap_publisher = self.create_publisher(Image, "heatmap", 1) if self.config["publish_heatmap"] else None
-        self.source = source_factory(
-            port=self.config["port"], baudrate=self.config["baudrate"], sensor_id=self.config["sensor_id"],
-            queue_capacity=self.config["queue_capacity"], read_timeout=self.config["read_timeout_sec"],
-            read_batch_bytes=self.config["read_batch_bytes"],
-            no_data_timeout=self.config["stale_timeout_sec"],
-            reconnect_interval_sec=self.config["reconnect_interval_sec"],
-        ) if self.config["port"].strip() else None
+        self._source_factory = source_factory
+        self._port = self.config["port"].strip()
+        self._baudrate = self.config["baudrate"]
+        self._serial_revision = str(uuid.uuid4())
+        self._serial_ports = []
+        self._serial_error = ""
+        self.source = self._make_source(self._port, self._baudrate) if self._port else None
         self.info_publisher = self.create_publisher(
             SensorInfo, "info", QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                                            reliability=ReliabilityPolicy.RELIABLE))
@@ -103,17 +108,92 @@ class TactileNode(Node):
         self._last_info = None
         self.contact = ContactImaging(self, self.config["sensor_id"])
         self._publish_info()
+        self.serial_service = self.create_service(ManageSerial, "manage_serial", self.manage_serial)
         self._pending_events = []
         self.drain_timer = self.create_timer(0.005, self.drain_samples)
         self.state_timer = self.create_timer(1.0 / self.config["state_rate_hz"], self.publish_state)
         self.diagnostic_timer = self.create_timer(1.0 / self.config["diagnostics_rate_hz"], self.publish_diagnostics)
-        if not self.config["port"].strip():
-            self.get_logger().warning("No tactile port configured: disconnected. Set an explicit port; automatic port discovery is disabled.")
         if self.source is not None:
             self.source.start()
         else:
-            self._pending_events.append(Batch(sensor_id=self.config["sensor_id"], session_id=str(uuid.uuid4()),
-                                              reason="port_not_configured"))
+            self._pending_events.append(self._boundary("port_not_configured"))
+
+    def _make_source(self, port, baudrate):
+        return self._source_factory(
+            port=port, baudrate=baudrate, sensor_id=self.config["sensor_id"],
+            queue_capacity=self.config["queue_capacity"], read_timeout=self.config["read_timeout_sec"],
+            read_batch_bytes=self.config["read_batch_bytes"], no_data_timeout=self.config["stale_timeout_sec"],
+            reconnect_interval_sec=self.config["reconnect_interval_sec"],
+        )
+
+    def _boundary(self, reason):
+        # Administrative boundaries have their own session. SerialWorker's first
+        # row/health event starts at sequence zero in a fresh acquisition session.
+        return Batch(sensor_id=self.config["sensor_id"], session_id=str(uuid.uuid4()), reason=reason)
+
+    def _serial_state(self):
+        if self.source is None:
+            return "idle"
+        if not self.source.running:
+            return "error"
+        if self.source.connected:
+            return "connected"
+        return "error" if self._serial_error else "opening"
+
+    def _replace_serial(self, port, baudrate):
+        if (port, baudrate) == (self._port, self._baudrate):
+            if self._serial_state() != "error" and self._serial_error not in _DATA_TIMEOUTS:
+                return
+        next_source = self._make_source(port, baudrate) if port else None
+        if self.source is not None:
+            if not self.source.stop(timeout=1):
+                raise ValueError("正在释放原串口，请稍后刷新并重试")
+            # Publish every remaining archival batch, including the worker's
+            # terminal event, before retiring this source and its row clock.
+            self.drain_samples(self.config["queue_capacity"])
+
+        self._port, self._baudrate = port, baudrate
+        self.source = next_source
+        self._serial_revision = str(uuid.uuid4())
+        self._serial_error = ""
+        self._pending_events = [self._boundary("opening_serial" if port else "port_not_configured")]
+        self.drain_samples()
+        self.publish_state()
+        if next_source is not None:
+            try:
+                next_source.start()
+            except RuntimeError as exc:
+                # No worker acquired a descriptor; keep a retryable idle node.
+                self.source, self._port = None, ""
+                self._pending_events = [self._boundary("serial_start_failed")]
+                self.drain_samples()
+                self.publish_state()
+                raise ValueError(f"无法启动串口采集：{exc}") from exc
+
+    def manage_serial(self, request, result):
+        try:
+            if request.action == "refresh":
+                self._serial_ports = available_ports()
+            elif request.action not in ("connect", "disconnect"):
+                raise ValueError("不支持的串口操作")
+            elif request.expected_revision != self._serial_revision:
+                raise ValueError("串口配置已变化，请刷新后重试")
+            elif request.action == "connect":
+                if not request.baudrate:
+                    raise ValueError("波特率必须大于零")
+                validate_port(request.port)
+                self._replace_serial(request.port, request.baudrate)
+            else:
+                self._replace_serial("", self._baudrate)
+            result.success = True
+            result.message = self._serial_error
+        except (OSError, ValueError, RuntimeError) as exc:
+            result.success, result.message = False, str(exc)
+        result.ports = self._serial_ports
+        result.port, result.baudrate = self._port, self._baudrate
+        result.state, result.revision = self._serial_state(), self._serial_revision
+        result.session_id = self.source.session_id if self.source is not None else ""
+        return result
 
     def _publish_info(self, batch=None):
         connected = batch is not None and batch.connected
@@ -128,7 +208,7 @@ class TactileNode(Node):
             return
         info = SensorInfo(
             schema_version=1, sensor_id=self.config["sensor_id"], session_id=session_id,
-            stream_epoch=stream_epoch, connected=connected, port=self.config["port"],
+            stream_epoch=stream_epoch, connected=connected, port=self._port,
             hardware_id=hardware_id, protocol_id=PROTOCOL_ID, layout_id=LAYOUT_ID,
             rows=ROWS, cols=COLS, unit="adc_counts", driver_version=self._driver_version,
             clock_domain=CLOCK_DOMAIN, timing_source=TIMING_SOURCE,
@@ -149,15 +229,20 @@ class TactileNode(Node):
                 return SetParametersResult(successful=False, reason="Capture parameters are startup-only; restart the node to change them.")
         return SetParametersResult(successful=True)
 
-    def drain_samples(self):
+    def drain_samples(self, limit=128):
         # This queue is independent of the DDS KEEP_LAST history. A blocked DDS
         # publish never makes the serial thread wait on the ROS executor.
         batches = self._pending_events
         self._pending_events = []
         if self.source is not None:
-            batches = batches + self.source.drain(limit=128)
+            batches = batches + self.source.drain(limit=limit)
         for batch in batches:
             self._last_batch = batch
+            if batch.reason.startswith("serial_error:") or batch.reason in (*_DATA_TIMEOUTS, "device_identity_changed"):
+                self._serial_error = batch.reason
+            elif batch.reason != "stopped":
+                # A terminal "stopped" batch follows the underlying open/read error.
+                self._serial_error = ""
             self._publish_info(batch)
             self.assembler.apply(batch)
             self.sample_publisher.publish(sample_message(batch, self.frame_id))
@@ -201,7 +286,7 @@ class TactileNode(Node):
             level=level, name=f"tactile/{self.config['sensor_id']}",
             hardware_id=self._last_info.hardware_id, message=reason or "ok",
             values=[KeyValue(key=key, value=str(value)) for key, value in {
-                "port": self.config["port"], "unit": "adc_counts",
+                "port": self._port, "baudrate": self._baudrate, "unit": "adc_counts",
                 "source_sequence": snapshot.source_sequence if snapshot else 0,
                 "producer_dropped_total": dropped,
                 "discarded_bytes_total": batch.discarded_bytes_total if batch else 0,

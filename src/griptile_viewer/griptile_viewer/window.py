@@ -15,6 +15,7 @@ from griptile_core.contact_image import (
 
 from griptile_core.grid import ROWS, COLS
 from .load_dialog import LoadDialog
+from .serial_dialog import SerialDialog
 from .storage import load_reference, save_reference, save_snapshot
 
 
@@ -64,11 +65,13 @@ def _contact_legend():
 
 
 class ViewerWindow(QtWidgets.QMainWindow):
-    def __init__(self, model, clock_ns=time.monotonic_ns, request_reference=None):
+    def __init__(self, model, clock_ns=time.monotonic_ns, request_reference=None, serial_control=None):
         super().__init__()
         self.model = model
         self.clock_ns = clock_ns
         self.request_reference = request_reference
+        self.serial_control = serial_control
+        self.serial_dialog = None
         self.last_receipt_wall_ns = time.monotonic_ns()
         self.last_message = None
         self.setWindowTitle(f"GripTile Viewer · {model.sensor_id}")
@@ -100,6 +103,10 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.ref_status.setObjectName("reference")
         header.addWidget(self.ref_status)
         header.addStretch()
+        self.serial_button = QtWidgets.QPushButton("串口设置")
+        self.serial_button.setVisible(not model.replay)
+        self.serial_button.clicked.connect(self.open_serial_dialog)
+        header.addWidget(self.serial_button)
         self.reference_button = QtWidgets.QPushButton("采集无载参考")
         self.reference_button.setToolTip("保持夹爪无载，采集 3 秒")
         self.reference_button.clicked.connect(self.start_reference)
@@ -235,6 +242,13 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.request_reference(profile)
         if self.mode.currentIndex() != SURFACE_MODE:
             self.mode.setCurrentIndex(CONTACT_MODE)
+
+    def open_serial_dialog(self):
+        if self.model.replay:
+            return
+        if self.serial_dialog is None:
+            self.serial_dialog = SerialDialog(self, self.serial_control)
+        self.serial_dialog.open_settings()
 
     def open_load_dialog(self):
         if self.load_dialog is None:
@@ -383,3 +397,5 @@ class ViewerWindow(QtWidgets.QMainWindow):
                                                     model.rejection, model.service_error))))
         if self.load_dialog is not None:
             self.load_dialog.refresh()
+        if self.serial_dialog is not None:
+            self.serial_dialog.refresh_view()
