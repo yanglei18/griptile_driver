@@ -7,7 +7,9 @@ import time
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PyQt5")
 import numpy as np
 import pyqtgraph as pg
-from pyqtgraph.Qt import QtCore, QtWidgets
+from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
+
+from griptile_core.contact_image import INVALID_RGB, STRONG_RGB, UNLOADED_RGB, WEAK_RGB
 
 from griptile_core.grid import ROWS, COLS
 from .storage import load_reference, save_reference, save_snapshot
@@ -22,11 +24,24 @@ RAW = _palette(("#151629", "#383d87", "#157d98", "#45b88c", "#fee681"))
 DELTA = _palette(("#2d5eaf", "#8ab9e6", "#f9f8ee", "#f2a272", "#a0373c"))
 
 
+CONTACT_MODE, RAW_MODE, DELTA_MODE = range(3)
+
+
+def _swatch(rgb, label):
+    return '<span style="color:#%02x%02x%02x">■</span> %s' % (*rgb, label)
+
+
+CONTACT_LEGEND = "　".join(_swatch(rgb, name) for rgb, name in (
+    (UNLOADED_RGB, "无接触"), (WEAK_RGB, "弱接触"), (STRONG_RGB, "强接触"), (INVALID_RGB, "无有效测量或参考")
+))
+
+
 class ViewerWindow(QtWidgets.QMainWindow):
-    def __init__(self, model, clock_ns=time.monotonic_ns):
+    def __init__(self, model, clock_ns=time.monotonic_ns, request_reference=None):
         super().__init__()
         self.model = model
         self.clock_ns = clock_ns
+        self.request_reference = request_reference
         self.last_receipt_wall_ns = time.monotonic_ns()
         self.last_message = None
         self.setWindowTitle(f"GripTile Viewer · {model.sensor_id}")
@@ -53,9 +68,10 @@ class ViewerWindow(QtWidgets.QMainWindow):
         layout.addWidget(self.status)
         controls = QtWidgets.QHBoxLayout()
         self.mode = QtWidgets.QComboBox()
-        self.mode.addItems(["原始 ADC", "相对无载参考 ΔADC"])
+        self.mode.addItems(["接触图 RGB", "原始 ADC", "相对无载参考 ΔADC"])
         controls.addWidget(self.mode)
-        controls.addWidget(QtWidgets.QLabel("差值色限 ±"))
+        self.span_label = QtWidgets.QLabel("差值色限 ±")
+        controls.addWidget(self.span_label)
         self.span = QtWidgets.QSpinBox()
         self.span.setRange(1, 65535)
         self.span.setValue(3000)
@@ -76,18 +92,22 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.map.getViewBox().setMenuEnabled(False)
         self.map.setMouseEnabled(False, False)
         self.map.invertY()
+        self.map.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, False)
         self.map.setXRange(0, COLS, padding=0)
         self.map.setYRange(0, ROWS, padding=0)
         ticks = [(n + .5, str(n)) for n in (0, 4, 9, 14, 19)]
         for axis in ("left", "bottom"):
             self.map.getAxis(axis).setTicks([ticks])
-        self.image = pg.ImageItem(axisOrder="row-major")
+        self.image = pg.ImageItem(axisOrder="row-major", autoDownsample=False)
         self.map.addItem(self.image)
         self.marker = self.map.plot([], [], pen=None, symbol="s", symbolPen=pg.mkPen("w", width=2),
                                     symbolBrush=None, symbolSize=13)
         self.map.scene().sigMouseClicked.connect(self.pick_cell)
         self.map.scene().sigMouseMoved.connect(self.inspect_cell)
         layout.addWidget(self.map, stretch=4)
+        self.scale = QtWidgets.QLabel(CONTACT_LEGEND)
+        self.scale.setTextFormat(QtCore.Qt.RichText)
+        layout.addWidget(self.scale)
         self.cell_label = QtWidgets.QLabel("点击单元查看曲线")
         layout.addWidget(self.cell_label)
         self.curve = pg.PlotWidget(background="#171b21")
@@ -105,7 +125,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self._file_button(footer, "保存参考", "JSON (*.json)", "save_ref")
         self._file_button(footer, "加载参考", "JSON (*.json)", "load_ref")
         self._file_button(footer, "导出 ADC 快照", "CSV (*.csv)", "csv")
-        self._file_button(footer, "导出热图", "PNG (*.png)", "png")
+        self._file_button(footer, "导出图像", "PNG (*.png)", "png")
         footer.addStretch()
         layout.addLayout(footer)
         self._format = None
@@ -124,21 +144,34 @@ class ViewerWindow(QtWidgets.QMainWindow):
             return
         try:
             if action == "load_ref":
-                load_reference(self.model, path)
-                self.mode.setCurrentIndex(1)
+                self._request(load_reference(self.model, path))
             elif action == "save_ref":
                 save_reference(self.model, path)
             elif action == "csv":
                 save_snapshot(self.model, path, self.clock_ns())
-            elif not self.map.grab().save(path, "PNG"):
-                raise OSError("无法保存图像")
+            else:
+                self.save_png(path)
         except (ValueError, OSError, TypeError) as error:
             self.statusBar().showMessage(str(error), 6000)
 
+    def save_png(self, path):
+        if self.mode.currentIndex() == CONTACT_MODE:
+            pixels = self.model.contact_pixels(self.clock_ns())
+            image = QtGui.QImage(pixels.data, COLS, ROWS, pixels.strides[0], QtGui.QImage.Format_RGB888)
+        else:
+            image = self.map.grab()
+        if not image.save(str(path), "PNG"):
+            raise OSError("无法保存图像")
+
+    def _request(self, profile=None):
+        if self.request_reference is None:
+            raise ValueError("等待驱动的无载参考服务")
+        self.request_reference(profile)
+        self.mode.setCurrentIndex(CONTACT_MODE)
+
     def start_reference(self):
         try:
-            self.model.start_reference(self.clock_ns())
-            self.mode.setCurrentIndex(1)
+            self._request()
         except ValueError as error:
             self.statusBar().showMessage(str(error), 5000)
 
@@ -156,7 +189,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
     def inspect_cell(self, position):
         cell = self.cell_at(position)
         if cell is not None:
-            delta = self.mode.currentIndex() == 1
+            delta = self.mode.currentIndex() == DELTA_MODE
             value = self.model.values(self.clock_ns(), delta)[cell]
             label = f"{value:g} {'ΔADC' if delta else 'ADC'}" if np.isfinite(value) else "无有效值"
             self.statusBar().showMessage(f"行 {cell[0]}  列 {cell[1]}    {label}", 1500)
@@ -172,16 +205,26 @@ class ViewerWindow(QtWidgets.QMainWindow):
             self.last_receipt_wall_ns = wall_ns
         replay_pause = model.replay and wall_ns - self.last_receipt_wall_ns > 1_000_000_000
         valid = model.mask(now)
-        if (model.response.status.phase == "collecting" and message
-                and now - model.receive_clock > max(250_000_000, message.max_age_ns)):
-            model.response.cancel_reference("数据中断")
-        delta = self.mode.currentIndex() == 1
-        levels = (-self.span.value(), self.span.value()) if delta else (0, 65535)
-        current_format = (delta, levels)
-        if current_format != self._format:
-            self.image.setLookupTable(DELTA if delta else RAW)
-            self._format = current_format
-        self.image.setImage(model.values(now, delta), autoLevels=False, levels=levels)
+        mode = self.mode.currentIndex()
+        delta = mode == DELTA_MODE
+        contact = mode == CONTACT_MODE
+        self.span.setVisible(delta)
+        self.span_label.setVisible(delta)
+        self.scale.setVisible(contact)
+        if self._format != mode:
+            self.image.setLookupTable({CONTACT_MODE: None, RAW_MODE: RAW, DELTA_MODE: DELTA}[mode])
+            self._format = mode
+        if contact:
+            frame = model.contact_pixels(now)
+            self.image.setImage(frame, autoLevels=False, levels=None)
+            usable = np.any(frame != INVALID_RGB, axis=2)
+            active = usable & np.any(frame != UNLOADED_RGB, axis=2)
+            summary = (f"接触 {active.sum()} 点　有效像素 {usable.sum()}/400" if usable.any()
+                       else "接触点待测　有效像素 0/400")
+        else:
+            levels = (-self.span.value(), self.span.value()) if delta else (0, 65535)
+            self.image.setImage(model.values(now, delta), autoLevels=False, levels=levels)
+            summary = f"色域 {levels[0]} 至 {levels[1]} {'ΔADC' if delta else 'ADC'}　灰色为无效单元"
         row, col = model.selected
         self.marker.setData([col + .5], [row + .5])
         raw = model.values(now)[row, col]
@@ -207,13 +250,16 @@ class ViewerWindow(QtWidgets.QMainWindow):
             state = "已连接"
         self.status.setText(f"{'回放' if model.replay else '实时'}   {model.sensor_id}    {state}"
                             f"    有效 {valid.sum()}/400")
-        phase = model.response.status
-        text = {"unreferenced": "无载参考未采集", "collecting": f"保持阵列无载 · {phase.progress:.0%}",
-                "ready": f"无载参考就绪 · {phase.reference_cells}/400",
-                "failed": f"参考采集未完成 · {phase.reason}"}.get(phase.phase, phase.phase)
+        status = model.current_reference
+        phase = status.phase if status else "unreferenced"
+        if phase == "ready" and model.reference:
+            text = f"无载参考就绪 · {sum(model.reference.valid_mask)}/400    满量程 {status.span_adc:g} ADC"
+        elif phase == "collecting":
+            text = f"保持阵列无载 · {status.progress:.0%}"
+        elif phase == "failed":
+            text = f"参考采集未完成 · {status.reason}"
+        else:
+            text = "请保持阵列无载，点击「采集无载参考」"
         self.ref_status.setText(text)
-        self.span.setEnabled(delta)
-        self.reference_button.setEnabled(bool(valid.any()) and phase.phase != "collecting")
-        self.legend.setText(f"色域 {levels[0]} 至 {levels[1]} {'ΔADC' if delta else 'ADC'}  ·  灰色为无效单元"
-                            + (f"    {model.diagnostic}" if model.diagnostic else "")
-                            + (f"    {model.rejection}" if model.rejection else ""))
+        self.reference_button.setEnabled(self.request_reference is not None and bool(valid.any()) and phase != "collecting")
+        self.legend.setText("    ".join(filter(None, (summary, model.diagnostic, model.rejection, model.service_error))))

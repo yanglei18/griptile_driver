@@ -37,7 +37,7 @@ def load_reference(view, path):
     doc = json.loads(raw)
     if not isinstance(doc, dict) or doc.get("version") != 1 or doc.get("binding") != binding:
         raise ValueError("参考文件与当前传感器、协议或布局不匹配")
-    view.adopt_reference(ReferenceProfile.from_dict(doc.get("reference")))
+    return ReferenceProfile.from_dict(doc.get("reference"))
 
 
 def save_snapshot(view, path, clock_ns):

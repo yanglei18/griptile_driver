@@ -1,0 +1,13 @@
+# An empty request begins unloaded reference capture. Target a session explicitly
+# to reject stale UI actions. Imported profiles require a matched hardware identity.
+bool load_profile
+string sensor_id
+string session_id
+uint32 stream_epoch
+string hardware_id
+float64[<=400] baseline_adc
+float64[<=400] activation_threshold_adc
+bool[<=400] valid_mask
+---
+bool success
+string message

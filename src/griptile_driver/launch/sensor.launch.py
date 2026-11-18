@@ -1,5 +1,6 @@
 """Launch the serial driver and optionally a read-only matrix viewer."""
 
+from griptile_driver import contact_launch
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition
@@ -13,6 +14,7 @@ def generate_launch_description():
     namespace = LaunchConfiguration("namespace")
     identity = {"sensor_id": ParameterValue(sensor_id, value_type=str)}
     return LaunchDescription([
+        *contact_launch.arguments(),
         DeclareLaunchArgument("sensor_id", default_value="sensor_0"),
         DeclareLaunchArgument("namespace", default_value=["/tactile/", sensor_id]),
         DeclareLaunchArgument("port", default_value="", description="Explicit serial device path"),
@@ -24,6 +26,7 @@ def generate_launch_description():
         Node(package="griptile_driver", executable="griptile_node", namespace=namespace,
              output="screen", parameters=[{
                  **identity,
+                 **contact_launch.parameters(),
                  "port": ParameterValue(LaunchConfiguration("port"), value_type=str),
                  "baudrate": ParameterValue(LaunchConfiguration("baudrate"), value_type=int),
                  "publish_heatmap": ParameterValue(LaunchConfiguration("publish_heatmap"), value_type=bool),

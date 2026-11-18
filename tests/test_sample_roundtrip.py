@@ -15,7 +15,9 @@ import time
 
 import rclpy
 import rosbag2_py
-from griptile_msgs.msg import SensorInfo, TactileGridState, TactileRow44Array
+from griptile_msgs.msg import ContactReference, SensorInfo, TactileGridState, TactileRow44Array
+from griptile_msgs.srv import SetContactReference
+from sensor_msgs.msg import Image
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.serialization import deserialize_message
 
@@ -98,6 +100,9 @@ def test_sample_bag_roundtrip(tmp_path, monkeypatch):
     rclpy.init(args=[])
     observer = rclpy.create_node("griptile_roundtrip")
     live, replay, info = [], [], []
+    live_images, replay_images = [], []
+    observer.create_subscription(Image, NS + "/contact_image", live_images.append, 5)
+    observer.create_subscription(Image, "/tactile/replay/contact_image", replay_images.append, 5)
     preview_qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, depth=8)
     info_qos = QoSProfile(durability=DurabilityPolicy.TRANSIENT_LOCAL, depth=1)
     observer.create_subscription(TactileGridState, NS + "/state", live.append, preview_qos)
@@ -125,6 +130,14 @@ def test_sample_bag_roundtrip(tmp_path, monkeypatch):
                       list(m.adc) == expected_grid for m in live))
                 last = next(m for m in reversed(live) if all(m.valid_mask)
                             and list(m.adc) == expected_grid)
+                # This input contains no identified unloaded reference.
+                # Both paths should render every measured pixel as unknown.
+                def unknown_image(frames):
+                    return any(frame.header == last.header and frame.encoding == "rgb8"
+                               and frame.width == 20 and frame.height == 20 and frame.step == 60
+                               and bytes(frame.data) == bytes([128]) * 1200 for frame in frames)
+
+                until(observer, lambda: unknown_image(live_images))
         stored_rows, metadata = read_bag(bag)
         assert stored_rows == expected
         assert any(m.sensor_id == "sensor_0" and m.connected and m.unit == "adc_counts"
@@ -142,6 +155,7 @@ def test_sample_bag_roundtrip(tmp_path, monkeypatch):
                       and list(m.row_monotonic_ns) == list(last.row_monotonic_ns)
                       and list(m.row_realtime_ns) == list(last.row_realtime_ns)
                       for m in replay))
+                until(observer, lambda: unknown_image(replay_images))
                 assert player.wait(timeout=8) == 0
             # Only the replay node is still alive. A newly opened viewer must
             # still be able to identify the source of the displayed matrix.
@@ -153,6 +167,7 @@ def test_sample_bag_roundtrip(tmp_path, monkeypatch):
                       replay_valid_cells=400, all_recorded_rows_equal=True,
                       replay_adc_masks_and_row_clocks_match=True, source_info_recorded=True,
                       replay_info_available_after_player_exit=True,
+                      unreferenced_live_and_replay_images_all_unknown=True,
                       synthetic_lookahead_bytes=4, physical_hardware_opened=False,
                       input_kind="archived_serial_bytes" if os.environ.get("GRIPTILE_WIRE") else "synthetic")
         report_file = os.environ.get("GRIPTILE_REPORT")
@@ -160,6 +175,109 @@ def test_sample_bag_roundtrip(tmp_path, monkeypatch):
             with Path(report_file).open("x") as output:
                 json.dump(report, output, indent=2)
                 output.write("\n")
+    finally:
+        os.close(master)
+        observer.destroy_node()
+        rclpy.shutdown()
+
+
+def test_recorded_reference_rebuilds_native_contact_image(tmp_path, monkeypatch):
+    """A recorder joining after calibration must retain that reference in the bag."""
+    import numpy as np
+    from griptile_core.contact_image import INVALID_RGB, STRONG_RGB, UNLOADED_RGB
+
+    monkeypatch.setenv("ROS_DOMAIN_ID", str(101 + os.getpid() % 17))
+    monkeypatch.setenv("ROS_AUTOMATIC_DISCOVERY_RANGE", "LOCALHOST")
+    monkeypatch.setenv("ROS_LOG_DIR", str(tmp_path / "logs"))
+    idle = np.arange(400, dtype=int).reshape(20, 20) + 18000
+    pressed = idle.copy()
+    pressed[2, 5] += 4400
+    pressed[15, 6] += 400
+
+    def wire(matrix):
+        return b"".join(PACKET.pack(b"\xa5\x5a", row, *values) for row, values in enumerate(matrix))
+
+    master, slave = os.openpty()
+    port = os.ttyname(slave)
+    os.close(slave)
+    os.set_blocking(master, False)
+    rclpy.init(args=[])
+    observer = rclpy.create_node("griptile_contact_roundtrip")
+    reference_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+    refs, states, images, reconstructed = [], [], [], []
+    observer.create_subscription(TactileGridState, NS + "/state", states.append,
+                                 QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
+    observer.create_subscription(ContactReference, NS + "/contact_reference", refs.append, reference_qos)
+    observer.create_subscription(Image, NS + "/contact_image", images.append, 5)
+    observer.create_subscription(Image, "/tactile/replay/contact_image", reconstructed.append, 5)
+    capture = observer.create_client(SetContactReference, NS + "/set_contact_reference")
+    pending = b""
+
+    def feed(matrix, predicate, description):
+        nonlocal pending
+        frame = wire(matrix)
+        deadline = time.monotonic() + 9
+        while time.monotonic() < deadline:
+            if not pending:
+                pending = frame
+            try:
+                pending = pending[os.write(master, pending):]
+            except BlockingIOError:
+                pass
+            rclpy.spin_once(observer, timeout_sec=.005)
+            time.sleep(.015)
+            if predicate():
+                return
+        raise AssertionError(description)
+
+    def pixels(message):
+        assert (message.encoding, message.height, message.width, message.step) == ("rgb8", 20, 20, 60)
+        assert len(message.data) == 1200
+        return np.frombuffer(message.data, dtype=np.uint8).reshape(20, 20, 3)
+
+    def two_touches(message):
+        rgb = pixels(message)
+        active = np.any(rgb != UNLOADED_RGB, axis=2)
+        return (active.sum() == 2 and np.array_equal(rgb[2, 5], STRONG_RGB)
+                and active[15, 6] and 0 < rgb[15, 6, 0] < rgb[2, 5, 0])
+
+    try:
+        bag = tmp_path / "contacts"
+        with running(["ros2", "launch", "griptile_driver", "sensor.launch.py", "port:=" + port,
+                      "max_cell_age_ms:=2000"], tmp_path / "contact-driver.log"):
+            feed(idle, lambda: bool(refs and refs[-1].session_id and images
+                                    and np.all(pixels(images[-1]) == INVALID_RGB)
+                                    and capture.service_is_ready()), "no unreferenced gray image")
+            # Connection is announced before the first valid row is decoded.
+            feed(idle, lambda: bool(states and all(states[-1].valid_mask)), "no live rows")
+            result = capture.call_async(SetContactReference.Request())
+            feed(idle, result.done, "capture request timed out")
+            assert result.result().success, result.result().message
+            feed(idle, lambda: bool(refs[-1].phase == "ready" and all(refs[-1].valid_mask)
+                                    and np.all(pixels(images[-1]) == UNLOADED_RGB)), "no unloaded white image")
+            with running(["ros2", "bag", "record", "-s", "mcap", "-o", str(bag),
+                          "--qos-profile-overrides-path", str(QOS_PATH), "--topics",
+                          NS + "/samples", NS + "/info", NS + "/contact_reference"], tmp_path / "contact-record.log"):
+                feed(idle, lambda: (observer.count_subscribers(NS + "/samples") >= 1 and
+                                    observer.count_subscribers(NS + "/contact_reference") >= 2),
+                     "recorder not subscribed")
+                feed(pressed, lambda: two_touches(images[-1]), "asymmetric footprint is incorrect")
+                expected = bytes(images[-1].data)
+                # Each pose spans several state refreshes on both timelines.
+                hold_until = time.monotonic() + .25
+                feed(pressed, lambda: time.monotonic() >= hold_until, "could not hold contact")
+                release_after = time.monotonic() + .25
+                feed(idle, lambda: time.monotonic() >= release_after
+                     and np.all(pixels(images[-1]) == UNLOADED_RGB), "release did not clear image")
+        with running(["ros2", "launch", "griptile_driver", "replay.launch.py",
+                      "max_cell_age_ms:=2000"], tmp_path / "contact-replay.log"):
+            until(observer, lambda: observer.count_subscribers(NS + "/contact_reference") >= 2
+                  and observer.count_subscribers(NS + "/samples") >= 1)
+            with running(["ros2", "bag", "play", str(bag), "--clock", "100", "--rate", "0.5",
+                          "--delay", "0.5", "--disable-keyboard-controls"], tmp_path / "contact-play.log"):
+                until(observer, lambda: any(bytes(msg.data) == expected for msg in reconstructed))
+                reconstructed.clear()
+                until(observer, lambda: any(np.all(pixels(msg) == UNLOADED_RGB) for msg in reconstructed))
     finally:
         os.close(master)
         observer.destroy_node()

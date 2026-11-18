@@ -1,8 +1,10 @@
 # griptile_driver
 
-A ROS 2 driver and a 2D viewer for one USB serial gripper tactile array. Inspect all 400 ADC channels, select a cell to track contact and release, or record decoded samples for playback. The driver owns the serial device and ROS subscribers share its output. [中文说明](../README.md)
+A ROS 2 driver and a 2D viewer for one USB serial gripper tactile array. Each taxel maps to one RGB pixel. See where the gripper touches an object, how many cells respond and how response varies across its contact footprint. The driver owns the serial device and ROS subscribers share its output. [中文说明](../README.md)
 
-![Running the Qt viewer on a simulated contact](viewer-demo.png)
+![Simulated release, ring and two separated pads captured from the ROS image topic](contact-footprints.png)
+
+[Native 20×20 RGB example](contact-ring.png) · [Qt window](viewer-demo.png)
 
 ## Build and run
 
@@ -27,7 +29,15 @@ For a real sensor, substitute its serial path below. A stable symlink under `/de
 ros2 launch griptile_driver sensor.launch.py port:=/dev/ttyUSB0 gui:=true
 ```
 
-The axes use native row and column addresses 0–19. Start with raw ADC. Select a cell to inspect its time series. To view signed change, unload the sensor and click the three-second reference button. Gray cells have no current valid measurement. The viewer exports CSV snapshots and PNG heatmaps. Reference files can be reused across sessions with a matching verified device identity and layout. ADC-to-force conversion requires a separate physical calibration.
+The default contact view uses row and column addresses 0–19, with row zero at the top and column zero at the left. Open the gripper, unload the surface and click the three-second reference button. Once the reference is ready, white pixels indicate measured cells with no detected contact. Weak contacts appear dark reddish brown and progress to saturated red. Gray pixels indicate missing reference or stale data. The demo supplies unloaded samples until the driver confirms the reference, then cycles through a ring, release and two separate contact patches.
+
+The viewer magnifies the native pixels with nearest-neighbor sampling. Contact-mode PNG export writes the original 20×20 RGB image. The contact footprint counts responding cells; conversion to physical area requires sensor dimensions. Intensity is a noise-gated ADC change; force or pressure units require physical calibration. Raw ADC and signed delta views, per-cell traces and CSV export remain available. Saved references can be reused with a verified matching device and layout.
+
+The color scale is fixed across frames. The default full red response is 3000 ADC counts. Set `contact_span_adc:=6000.0` to extend the range. The default `contact_direction:=both` accepts either sign of ADC change. Select `increase` or `decrease` when the pressure polarity is known. All subscribers share the driver's calibration. From a headless terminal with the gripper unloaded, request it with the command below.
+
+```bash
+ros2 service call /tactile/sensor_0/set_contact_reference griptile_msgs/srv/SetContactReference '{}'
+```
 
 ## ROS interfaces
 
@@ -39,7 +49,9 @@ The default namespace is `/tactile/sensor_0`. Set a different logical ID with `s
 | `info` | `griptile_msgs/msg/SensorInfo` | Protocol, layout, units and available device identity. Uses reliable transient-local QoS |
 | `state` | `griptile_msgs/msg/TactileGridState` | Rolling array, row times, valid and updated masks. Defaults to 30 Hz |
 | `diagnostics` | `diagnostic_msgs/msg/DiagnosticArray` | Connection, freshness, dropped batches and framing errors |
-| `heatmap` | `sensor_msgs/msg/Image` | Optional RGB preview. Enable with `publish_heatmap:=true` |
+| `contact_image` | `sensor_msgs/msg/Image` | Native 20×20 RGB8 contact image, 60 bytes per row, source header preserved |
+| `contact_reference` | `griptile_msgs/msg/ContactReference` | Reference progress, session and device binding, ready coefficients, direction and display range. Transient-local |
+| `heatmap` | `sensor_msgs/msg/Image` | Optional raw ADC color preview. Enable with `publish_heatmap:=true` |
 
 A 44-byte packet has a two-byte `A5 5A` header, a big-endian uint16 row index and twenty big-endian uint16 ADC values. The protocol has no documented checksum, device timestamp or hardware sequence counter. Samples use host read-completion times. A grid combines sequential row updates and uses a 100 ms default freshness limit. Read the validity mask alongside ADC values. Zero can be a valid measurement.
 
@@ -50,7 +62,7 @@ With the default driver running, start the recorder in another terminal, wait fo
 ```bash
 qos="$(ros2 pkg prefix --share griptile_driver)/config/record_qos.yaml"
 ros2 bag record -s mcap -o grip_run --qos-profile-overrides-path "$qos" \
-  --topics /tactile/sensor_0/samples /tactile/sensor_0/info
+  --topics /tactile/sensor_0/samples /tactile/sensor_0/info /tactile/sensor_0/contact_reference
 ```
 
 Stop the live driver, launch the replay node and viewer in one terminal, then play the bag from another. The reconstructed array is published on `/tactile/replay/state`. While the replay node remains running, late subscribers can read the original sensor metadata on `/tactile/replay/info` after the player exits. If live acquisition used a custom `max_cell_age_ms`, set the same value on replay to apply the same freshness policy.
@@ -62,6 +74,8 @@ ros2 launch griptile_driver replay.launch.py gui:=true
 ```bash
 ros2 bag play grip_run --clock 100 --delay 1
 ```
+
+The replay node uses recorded references on the matching acquisition session to reconstruct `/tactile/replay/contact_image`. Older bags without a reference can display raw ADC. To create a reference during replay, use a known unloaded interval. To preserve the exact RGB frames as originally published, also record `/tactile/sensor_0/contact_image` and view that original topic during playback.
 
 To replay a recording made with `sensor_id:=jaw_a`, pass that same argument to the replay launch. If you also used a custom namespace such as `/robot/jaw`, add `source_namespace:=/robot/jaw`.
 

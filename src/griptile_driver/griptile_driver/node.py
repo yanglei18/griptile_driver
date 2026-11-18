@@ -27,6 +27,7 @@ from griptile_core.identity import validate_sensor_id
 from griptile_core.protocol import PROTOCOL_ID
 from griptile_core.serial_source import Batch, CLOCK_DOMAIN, MAX_READ_BYTES, SerialWorker, TIMING_SOURCE
 
+from .contact import ContactImaging
 from .lifecycle import shutdown_ros
 from .ros_messages import heatmap_message, sample_message, state_message
 
@@ -100,6 +101,7 @@ class TactileNode(Node):
                                            reliability=ReliabilityPolicy.RELIABLE))
         self._driver_version = version("griptile_driver")
         self._last_info = None
+        self.contact = ContactImaging(self, self.config["sensor_id"])
         self._publish_info()
         self._pending_events = []
         self.drain_timer = self.create_timer(0.005, self.drain_samples)
@@ -137,6 +139,7 @@ class TactileNode(Node):
         info.header.frame_id = self.frame_id
         self.info_publisher.publish(info)
         self._last_info = info
+        self.contact.update_info(info)
 
     def _validate_parameter_change(self, parameters):
         for parameter in parameters:
@@ -166,6 +169,7 @@ class TactileNode(Node):
             self._monotonic_ns(), int(self.config["max_cell_age_ms"] * 1e6))
         message = state_message(self._last_snapshot, self.frame_id)
         self.state_publisher.publish(message)
+        self.contact.update(message)
         if self.heatmap_publisher is not None:
             self.heatmap_publisher.publish(heatmap_message(message))
 

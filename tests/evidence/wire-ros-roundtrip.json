@@ -8,6 +8,7 @@
   "replay_adc_masks_and_row_clocks_match": true,
   "source_info_recorded": true,
   "replay_info_available_after_player_exit": true,
+  "unreferenced_live_and_replay_images_all_unknown": true,
   "synthetic_lookahead_bytes": 4,
   "physical_hardware_opened": false,
   "input_kind": "archived_serial_bytes"

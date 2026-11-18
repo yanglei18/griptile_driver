@@ -7,7 +7,9 @@ import time
 
 import rclpy
 from diagnostic_msgs.msg import DiagnosticArray
-from griptile_msgs.msg import SensorInfo, TactileGridState
+from griptile_msgs.msg import ContactReference, SensorInfo, TactileGridState
+from griptile_msgs.srv import SetContactReference
+from sensor_msgs.msg import Image
 from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.signals import SignalHandlerOptions
@@ -26,9 +28,13 @@ class ViewerNode(Node):
         self.view_clock = (lambda: self.get_clock().now().nanoseconds) if replay else time.monotonic_ns
         self.create_subscription(TactileGridState, "state", self._on_state,
                                  QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
-        self.create_subscription(SensorInfo, "info", self.model.accept_info,
-                                 QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
-                                            durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        metadata_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                                  durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.create_subscription(SensorInfo, "info", self.model.accept_info, metadata_qos)
+        self.create_subscription(ContactReference, "contact_reference", self._on_reference, metadata_qos)
+        self.create_subscription(Image, "contact_image", self._on_image, 1)
+        self.reference_client = self.create_client(SetContactReference, "set_contact_reference")
+        self.pending_reference = None
         self.create_subscription(DiagnosticArray, "diagnostics", self._on_diagnostics, 1)
 
     def _on_state(self, message):
@@ -36,6 +42,50 @@ class ViewerNode(Node):
             self.model.accept(message, self.view_clock())
         except (ValueError, TypeError, OverflowError) as error:
             self.model.invalidate(str(error))
+
+    def _on_image(self, message):
+        try:
+            self.model.accept_image(message)
+        except ValueError as error:
+            self.model.invalidate(str(error))
+
+    def _on_reference(self, message):
+        try:
+            self.model.accept_reference(message)
+        except (TypeError, ValueError) as error:
+            self.model.invalidate(str(error))
+
+    def request_reference(self, profile=None):
+        model = self.model
+        state = model.message
+        if state is None or not model.mask(self.view_clock()).any():
+            raise ValueError("请等到有新鲜触觉数据后再设置参考")
+        if not self.reference_client.service_is_ready():
+            raise ValueError("等待驱动的无载参考服务")
+        if self.pending_reference and not self.pending_reference.done():
+            raise ValueError("参考请求正在处理中")
+        request = SetContactReference.Request(sensor_id=model.sensor_id, session_id=state.session_id,
+                                              stream_epoch=state.stream_epoch)
+        if profile is not None:
+            binding = model.binding()
+            if not binding:
+                raise ValueError("加载参考需要已核验的设备标识")
+            request.load_profile = True
+            request.hardware_id = binding["hardware_id"]
+            request.baseline_adc = list(profile.baseline_adc)
+            request.activation_threshold_adc = list(profile.activation_threshold_adc)
+            request.valid_mask = list(profile.valid_mask)
+        model.service_error = ""
+        future = self.reference_client.call_async(request)
+        self.pending_reference = future
+        future.add_done_callback(self._reference_result)
+
+    def _reference_result(self, future):
+        try:
+            result = future.result()
+            self.model.service_error = "" if result.success else result.message
+        except Exception as error:
+            self.model.service_error = str(error)
 
     def _on_diagnostics(self, message):
         if message.status:
@@ -65,7 +115,7 @@ def main(args=None):
         executor = SingleThreadedExecutor()
         cleanup.callback(executor.shutdown)
         executor.add_node(node)
-        window = ViewerWindow(node.model, node.view_clock)
+        window = ViewerWindow(node.model, node.view_clock, node.request_reference)
         window.show()
         ros_timer = QtCore.QTimer()
 

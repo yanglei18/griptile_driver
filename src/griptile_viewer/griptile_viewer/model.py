@@ -4,7 +4,8 @@ from collections import deque
 
 import numpy as np
 
-from griptile_core.display_response import TactileResponseProcessor
+from griptile_core.contact_image import INVALID_RGB
+from griptile_core.display_response import ReferenceProfile
 from griptile_core.grid import CELL_COUNT, COLS, LAYOUT_ID, ROWS, SHAPE, normalize_state
 from griptile_core.identity import validate_sensor_id
 from griptile_core.protocol import PROTOCOL_ID
@@ -18,19 +19,24 @@ class ArrayView:
         self.selected = (0, 0)
         self.retired = deque(maxlen=16)
         self.trend = deque(maxlen=600)
-        self.response = TactileResponseProcessor()
+        # Independent DDS topics can arrive in either order. Retain only a few
+        # snapshots and images to match source stamps without blocking Qt.
+        self._states = deque(maxlen=4)
+        self._images = deque(maxlen=4)
+        self.reference_status = None
+        self.service_error = ""
+        self._profile = None
         self.info = None
         self.diagnostic = ""
         self.receive_clock = 0
         self.last_clock = None
         self.identity = None
         self.message = None
-        self.reference = None
         self.rejection = ""
 
     def reset_stream(self):
-        self.response.reset()
-        self.reference = None
+        self._states.clear()
+        self._images.clear()
         self.trend.clear()
         self.message = None
         self.identity = None
@@ -40,17 +46,61 @@ class ArrayView:
         if self.replay and self.last_clock is not None and clock_ns < self.last_clock:
             self.retired.clear()
             self.reset_stream()
+            self.reference_status = self._profile = None
+            self.info = None
         self.last_clock = clock_ns
 
     def accept_info(self, info):
         if (info.sensor_id == self.sensor_id and info.layout_id == LAYOUT_ID
                 and info.protocol_id == PROTOCOL_ID and info.unit == "adc_counts"):
-            previous = self.binding()
             self.info = info
-            if (previous is not None and (info.session_id, info.stream_epoch) == self.identity
-                    and self.binding() != previous):
-                self.response.reset("sensor identity changed")
-                self.reference = None
+
+    @property
+    def current_reference(self):
+        status = self.reference_status
+        if status is None or (status.session_id, status.stream_epoch) != self.identity:
+            return None
+        if (self.info and (self.info.session_id, self.info.stream_epoch) == self.identity
+                and self.info.hardware_id != status.hardware_id):
+            return None
+        return status
+
+    @property
+    def reference(self):
+        return self._profile if self.current_reference is not None else None
+
+    def accept_reference(self, status):
+        if (status.sensor_id != self.sensor_id or (status.session_id, status.stream_epoch) in self.retired):
+            return
+        profile = None
+        if status.phase == "ready":
+            profile = ReferenceProfile(np.asarray(status.baseline_adc), np.asarray(status.activation_threshold_adc),
+                                       np.asarray(status.valid_mask, dtype=bool))
+        self.reference_status, self._profile = status, profile
+
+    @staticmethod
+    def _key(header):
+        return (header.frame_id, header.stamp.sec, header.stamp.nanosec)
+
+    def accept_image(self, image):
+        if (image.encoding != "rgb8" or (image.height, image.width) != SHAPE
+                or image.step != COLS * 3 or len(image.data) != CELL_COUNT * 3):
+            raise ValueError("接触图需要 20×20 个 RGB8 像素")
+        pixels = np.frombuffer(bytes(image.data), dtype=np.uint8).reshape(ROWS, COLS, 3)
+        self._images.append((self._key(image.header), pixels))
+
+    def contact_pixels(self, clock_ns):
+        unknown = np.full((ROWS, COLS, 3), INVALID_RGB, dtype=np.uint8)
+        if self.reference is None or not self._images:
+            return unknown
+        for key, state, received in reversed(self._states):
+            pixels = next((rgb for stamp, rgb in reversed(self._images) if stamp == key), None)
+            if pixels is not None:
+                fresh = self._mask_at(state, received, clock_ns) & self.mask(clock_ns)
+                valid = fresh & np.asarray(self.reference.valid_mask).reshape(SHAPE)
+                unknown[valid] = pixels[valid]
+                break
+        return unknown
 
     def accept(self, message, clock_ns):
         if message.sensor_id != self.sensor_id:
@@ -72,7 +122,7 @@ class ArrayView:
                 return False
             if self.identity:
                 self.retired.append(self.identity)
-            self.reset_stream()
+                self.reset_stream()
             self.identity = identity
         elif self.message is not None:
             if (message.source_sequence < self.message.source_sequence
@@ -82,16 +132,12 @@ class ArrayView:
         self.rejection = ""
         self.message = message
         self.receive_clock = clock_ns
-        instant = int(message.snapshot_monotonic_ns)
         if not message.connected or not message.time_valid:
-            self.response.cancel_reference(message.reason or "no source")
+            self._states.clear()
+            self._images.clear()
             self._break_trend()
             return True
-        if self.response.status.phase == "collecting":
-            sample_times = np.repeat(message.row_monotonic_ns, COLS).astype(np.int64)
-            self.response.observe(message.adc, message.valid_mask, sample_times, identity, instant)
-            if self.response.status.phase == "ready":
-                self.reference = self.response.export_reference()
+        self._states.append((self._key(message.header), message, clock_ns))
         self._sample_trend()
         return True
 
@@ -100,12 +146,15 @@ class ArrayView:
         self.rejection = reason
 
     def mask(self, clock_ns):
-        message = self.message
+        return self._mask_at(self.message, self.receive_clock, clock_ns)
+
+    @staticmethod
+    def _mask_at(message, received, clock_ns):
         if message is None or not message.connected or not message.time_valid:
             return np.zeros(SHAPE, dtype=bool)
         # Subtract only timestamps from the same machine. Driver supplies age at
         # production; local elapsed time since receipt advances that lower bound.
-        elapsed = max(0, int(clock_ns) - self.receive_clock)
+        elapsed = max(0, int(clock_ns) - received)
         now_source = int(message.snapshot_monotonic_ns) + elapsed
         row_fresh = [
             stamp > 0 and 0 <= now_source - int(stamp) <= message.max_age_ns
@@ -127,12 +176,6 @@ class ArrayView:
                 data[~np.asarray(self.reference.valid_mask).reshape(SHAPE)] = np.nan
         return data
 
-    def start_reference(self, clock_ns):
-        if not self.mask(clock_ns).any():
-            raise ValueError("请等到有新鲜触觉数据时再采集参考")
-        self.reference = None
-        self.response.begin_reference(self.identity, self.message.snapshot_monotonic_ns)
-
     def binding(self):
         info = self.info
         if (self.identity and info and (info.session_id, info.stream_epoch) == self.identity
@@ -140,10 +183,6 @@ class ArrayView:
             return {"sensor_id": self.sensor_id, "hardware_id": info.hardware_id,
                     "protocol_id": PROTOCOL_ID, "layout_id": LAYOUT_ID}
         return None
-
-    def adopt_reference(self, profile):
-        self.response.load_reference(profile, self.identity, self.message.snapshot_monotonic_ns)
-        self.reference = profile
 
     def select(self, row, column):
         if self.selected != (row, column) and 0 <= row < ROWS and 0 <= column < COLS:

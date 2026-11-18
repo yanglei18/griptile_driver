@@ -1,8 +1,10 @@
 # griptile_driver
 
-适用于单块 USB 串口夹爪触觉阵列的 ROS 2 驱动和二维查看器。连接指定串口后即可查看 20×20 个单元的原始 ADC，点击单元可观察接触和释放时的读数变化。查看器、录制器与其他 ROS 节点可以同时订阅同一驱动。[English guide](docs/README.en.md)
+适用于单块 USB 串口夹爪触觉阵列的 ROS 2 驱动和二维查看器。每个触觉单元对应 RGB 图像中的一个像素，默认窗口直接呈现夹爪与物体的接触位置、覆盖范围和相对强弱。点击单元可查看 ADC 曲线。查看器、录制器与其他 ROS 节点可以同时订阅同一驱动。[English guide](docs/README.en.md)
 
-![使用模拟接触信号的二维阵列查看器](docs/viewer-demo.png)
+![由正式驱动发布的模拟无载、环形和双点接触图](docs/contact-footprints.png)
+
+上图使用模拟输入，按原始行列放大。环形的中心留白，两个分离接触区之间也保留空隙。[下载原生 20×20 RGB 示例](docs/contact-ring.png) · [查看窗口截图](docs/viewer-demo.png)
 
 ## 构建
 
@@ -19,7 +21,7 @@ source install/setup.bash
 
 ## 打开二维查看器
 
-没有硬件时，从仓库根目录启动模拟器。演示通过专用虚拟串口运行完整驱动，话题位于 `/tactile/demo`。按 Ctrl+C 退出。
+没有硬件时，从仓库根目录启动模拟器。演示先在专用虚拟串口上提供无载数据，收到驱动的参考就绪消息后循环展示环形接触、松开和双点接触。话题位于 `/tactile/demo`。按 Ctrl+C 退出。
 
 ```bash
 python3 examples/demo.py
@@ -31,7 +33,23 @@ python3 examples/demo.py
 ros2 launch griptile_driver sensor.launch.py port:=/dev/ttyUSB0 gui:=true
 ```
 
-窗口的行列编号从 0 到 19。原始模式可直接使用，灰色单元表示当前缺少有效测量。需要观察相对变化时，让阵列保持无载并点击「采集无载参考（3 秒）」，完成后显示有符号的 ΔADC。窗口可导出单元快照 CSV 与热图 PNG。能识别设备 USB 身份时，还能保存参考供同一设备和布局再次使用。设备的夹持力和压力单位需要独立的物理标定。
+窗口默认选择「接触图」。让夹爪张开、感应面保持无载，点击一次「采集无载参考（3 秒）」，等有效单元变白后即可接触物体。每次建立参考的是驱动，同一传感器的所有窗口和 ROS 图像订阅者共享该结果。
+
+| 像素颜色 | 含义 |
+| --- | --- |
+| 白色 | 该点有有效测量，变化处于无载噪声范围 |
+| 暗红褐色至鲜红 | 接触响应由弱到强，超过所选量程后保持纯红 |
+| 灰色 | 该点缺少可用参考或新鲜读数 |
+
+图像为 20 行 × 20 列的三通道 `rgb8`，第 0 行在上、第 0 列在左。每个像素大小相同。界面按最近邻放大，接触模式导出的是原生 20×20 彩色 PNG。一个接触区占据的像素数量反映阵列上被触及的范围；细节分辨率受触点间距限制。颜色表示相对无载的 ADC 变化，换算牛顿、帕斯卡或平方毫米需要对应的力学标定或几何尺寸。
+
+显示使用固定色域，默认去噪后 3000 ADC 对应满红。启动时传入 `contact_span_adc:=6000.0` 可增大显示量程。默认 `contact_direction:=both` 同时接受 ADC 向上或向下的变化，已知夹爪受压极性时可选 `increase` 或 `decrease`。原始 ADC、有符号 ΔADC 和快照 CSV 均可用于诊断。已核验 USB 身份的设备支持保存和复用无载参考。
+
+无界面运行时也可以在夹爪张开的状态下采集参考。
+
+```bash
+ros2 service call /tactile/sensor_0/set_contact_reference griptile_msgs/srv/SetContactReference '{}'
+```
 
 ## ROS 接口与时间
 
@@ -43,18 +61,20 @@ ros2 launch griptile_driver sensor.launch.py port:=/dev/ttyUSB0 gui:=true
 | `info` | `griptile_msgs/msg/SensorInfo` | 协议、布局、单位、当前连接及可用的设备标识。支持晚加入的订阅者 |
 | `state` | `griptile_msgs/msg/TactileGridState` | 供显示的滚动阵列，含逐行时间、有效掩码和更新掩码。默认 30 Hz |
 | `diagnostics` | `diagnostic_msgs/msg/DiagnosticArray` | 观察连接、数据龄期、丢批和结构错误 |
-| `heatmap` | `sensor_msgs/msg/Image` | 可选 RGB 预览，通过 `publish_heatmap:=true` 启用 |
+| `contact_image` | `sensor_msgs/msg/Image` | 默认发布的原生接触图。20×20、`rgb8`、每行 60 字节，header 沿用源阵列时间 |
+| `contact_reference` | `griptile_msgs/msg/ContactReference` | 参考采集进度、设备和会话、就绪后的逐点基线及阈值、色域和极性。支持晚加入的订阅者 |
+| `heatmap` | `sensor_msgs/msg/Image` | 可选原始 ADC 彩色预览，通过 `publish_heatmap:=true` 启用 |
 
 每行 44 字节，由帧头 `A5 5A`、一个大端 16 位行号和 20 个大端 16 位 ADC 值组成。协议无已知校验和、硬件时间戳或硬件序号。源时间来自串口读取完成的主机时钟。矩阵由先后收到的行组成，默认超过 100 ms 的行会标记过期。处理算法应同时读取 `adc` 和 `valid_mask`，零本身是合法读数。
 
 ## 录制与回放
 
-在默认传感器运行时，从另一终端录制采样和设备信息。待录制器显示已订阅后开始采集，按 Ctrl+C 完成保存。自定义命名空间时，同时修改话题名称和 QoS 文件中的键。
+在默认传感器运行时，从另一终端录制采样、设备信息及接触参考。待录制器显示已订阅后开始采集，按 Ctrl+C 完成保存。自定义命名空间时，同时修改话题名称和 QoS 文件中的键。
 
 ```bash
 qos="$(ros2 pkg prefix --share griptile_driver)/config/record_qos.yaml"
 ros2 bag record -s mcap -o grip_run --qos-profile-overrides-path "$qos" \
-  --topics /tactile/sensor_0/samples /tactile/sensor_0/info
+  --topics /tactile/sensor_0/samples /tactile/sensor_0/info /tactile/sensor_0/contact_reference
 ```
 
 停止该采集驱动，在一个终端启动回放窗口，再在另一个终端播放刚录好的包。重建的阵列位于 `/tactile/replay/state`。播放结束后，只要回放节点仍在运行，新打开的查看器也能通过 `/tactile/replay/info` 获取原传感器信息。录制时若修改过 `max_cell_age_ms`，回放时传入相同的值即可复用相同的过期判断。
@@ -66,6 +86,8 @@ ros2 launch griptile_driver replay.launch.py gui:=true
 ```bash
 ros2 bag play grip_run --clock 100 --delay 1
 ```
+
+新录包中的参考可用于恢复会话的接触图，查看 `/tactile/replay/contact_image` 即可。旧包缺少参考时仍能查看原始 ADC；若有明确的空载保持段，可以从该段采集参考。需要逐帧保存当时发布的精确像素时，录制命令中再加入 `/tactile/sensor_0/contact_image`，播放后可直接订阅该原始图像话题。
 
 若录制的传感器名为 `jaw_a`，回放启动命令也要增加 `sensor_id:=jaw_a`。若录制时还单独指定了命名空间，例如 `/robot/jaw`，同时增加 `source_namespace:=/robot/jaw`。
 
