@@ -5,7 +5,7 @@ import pytest
 
 from griptile_core.contact_image import (
     DEFAULT_CONTACT_SPAN, INVALID_RGB, STRONG_RGB, SURFACE_SCALE, UNLOADED_RGB, WEAK_RGB,
-    amplitude_rgb, contact_amplitude, contact_rgb, contact_surface_rgb,
+    amplitude_rgb, contact_amplitude, contact_intensity_rgb, contact_rgb, contact_surface_rgb,
 )
 from griptile_core.display_response import ReferenceProfile, ResponseSettings, TactileResponseProcessor
 from griptile_core.grid import CELL_COUNT, COLS, ROWS
@@ -13,6 +13,14 @@ from griptile_core.grid import CELL_COUNT, COLS, ROWS
 
 IDENTITY = ("sensor", 1)
 BASELINE = np.arange(CELL_COUNT) + 20_000
+
+
+def test_readout_swatch_matches_native_taxel_at_any_display_span():
+    field = np.zeros((ROWS, COLS))
+    field[0, :6] = [np.nan, 0, 1, 380, 1300, 4500]
+    native = amplitude_rgb(field, 1500)
+    for col in range(6):
+        assert contact_intensity_rgb(field[0, col], 1500) == tuple(native[0, col])
 
 
 def calibrated(direction="both", reference_mask=None):

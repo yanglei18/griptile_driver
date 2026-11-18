@@ -8,3 +8,4 @@
 - Add native RGB8 contact footprints, driver-owned unloaded references, recorded-reference replay and pixel-exact PNG export.
 - Open on the 300×300 continuous contact view and support PNG export from the 20×20 scalar response.
 - Use a shared blue-to-red intensity scale for the native ROS image, the continuous view and PNG exports. Show the scale in both contact views.
+- Add a guided live known-load calibration, independent loading and unloading checks, release residuals, and same-load repeats with a local JSON report.

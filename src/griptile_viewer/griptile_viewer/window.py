@@ -14,6 +14,7 @@ from griptile_core.contact_image import (
 )
 
 from griptile_core.grid import ROWS, COLS
+from .load_dialog import LoadDialog
 from .storage import load_reference, save_reference, save_snapshot
 
 
@@ -103,6 +104,10 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.reference_button = QtWidgets.QPushButton("采集无载参考（3 秒）")
         self.reference_button.clicked.connect(self.start_reference)
         controls.addWidget(self.reference_button)
+        self.load_dialog = None
+        self.load_button = QtWidgets.QPushButton("已知载荷验证")
+        self.load_button.clicked.connect(self.open_load_dialog)
+        controls.addWidget(self.load_button)
         controls.addStretch()
         layout.addLayout(controls)
         self.ref_status = QtWidgets.QLabel()
@@ -196,6 +201,25 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.request_reference(profile)
         if self.mode.currentIndex() != SURFACE_MODE:
             self.mode.setCurrentIndex(CONTACT_MODE)
+
+    def open_load_dialog(self):
+        if self.load_dialog is None:
+            self.load_dialog = LoadDialog(self)
+            # Place the guide beside the contact map on first open. Reopening
+            # respects any position the operator chose during the experiment.
+            screen = self.screen().availableGeometry()
+            frame = self.frameGeometry()
+            width = self.load_dialog.width()
+            if screen.right() - frame.right() >= frame.left() - screen.left():
+                left = min(frame.right() + 8, screen.right() - width + 1)
+            else:
+                left = max(frame.left() - width - 8, screen.left())
+            top = min(frame.top(), screen.bottom() - self.load_dialog.height() + 1)
+            self.load_dialog.move(max(left, screen.left()), max(top, screen.top()))
+        self.load_dialog.show()
+        self.load_dialog.raise_()
+        self.load_dialog.activateWindow()
+        self.load_dialog.refresh()
 
     def start_reference(self):
         try:
@@ -313,3 +337,5 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.ref_status.setText(text)
         self.reference_button.setEnabled(self.request_reference is not None and bool(valid.any()) and phase != "collecting")
         self.legend.setText("    ".join(filter(None, (summary, model.diagnostic, model.rejection, model.service_error))))
+        if self.load_dialog is not None:
+            self.load_dialog.refresh()

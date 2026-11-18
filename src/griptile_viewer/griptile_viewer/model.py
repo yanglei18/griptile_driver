@@ -1,6 +1,7 @@
 """Time-aware view of rolling source snapshots. No Qt or ROS dependency."""
 
 from collections import deque
+from dataclasses import replace
 
 import numpy as np
 
@@ -9,6 +10,8 @@ from griptile_core.display_response import ReferenceProfile
 from griptile_core.grid import CELL_COUNT, COLS, LAYOUT_ID, ROWS, SHAPE, normalize_state
 from griptile_core.identity import validate_sensor_id
 from griptile_core.protocol import PROTOCOL_ID
+
+from .load_capture import LoadContext, LoadObservation
 
 
 class ArrayView:
@@ -24,6 +27,9 @@ class ArrayView:
         self._states = deque(maxlen=4)
         self._images = deque(maxlen=4)
         self._responses = deque(maxlen=4)
+        self._load_reference = None
+        self._load_revision = 0
+        self._load_watermark = None
         self.reference_status = None
         self.service_error = ""
         self._profile = None
@@ -49,6 +55,7 @@ class ArrayView:
             self.retired.clear()
             self.reset_stream()
             self.reference_status = self._profile = None
+            self._load_reference = self._load_watermark = None
             self.info = None
         self.last_clock = clock_ns
 
@@ -81,6 +88,31 @@ class ArrayView:
             profile = ReferenceProfile(np.asarray(status.baseline_adc), np.asarray(status.activation_threshold_adc),
                                        np.asarray(status.valid_mask, dtype=bool))
         self.reference_status, self._profile = status, profile
+        self._bind_load_reference(status, profile)
+
+    def _bind_load_reference(self, status, profile):
+        # image headers identify an acquisition, not which reference generated it.
+        # Track the ready event and coefficients, including direct ready->ready loads.
+        context = LoadContext.from_reference(status, profile, self._load_revision)
+        header = getattr(status, "header", None)
+        if header is not None:
+            stream = status.session_id, int(status.stream_epoch)
+            stamp = int(header.stamp.sec) * 1_000_000_000 + int(header.stamp.nanosec)
+            if self._load_watermark and self._load_watermark[0] == stream and stamp < self._load_watermark[1]:
+                self._load_reference = None
+                return
+            self._load_watermark = stream, stamp
+        if self._load_reference != context:
+            self._load_revision += 1
+            self._load_reference = replace(context, generation=self._load_revision) if context else None
+
+    @property
+    def load_context(self):
+        message = self.message
+        if (self.reference is not None and message is not None and message.connected
+                and message.time_valid and self._load_reference is not None):
+            return self._load_reference
+        return None
 
     @staticmethod
     def _key(header):
@@ -103,26 +135,46 @@ class ArrayView:
             raise ValueError("接触响应应为非负数或缺测值")
         self._responses.append((self._key(image.header), amplitude))
 
-    def _paired_frame(self, frames, clock_ns):
+    def _paired_sample(self, frames, clock_ns):
         reference = self.reference
         if reference is not None and frames:
             for key, state, received in reversed(self._states):
                 frame = next((data for stamp, data in reversed(frames) if stamp == key), None)
                 if frame is not None:
                     fresh = self._mask_at(state, received, clock_ns) & self.mask(clock_ns)
-                    return frame, fresh & np.asarray(reference.valid_mask).reshape(SHAPE)
-        return None, None
+                    return frame, fresh & np.asarray(reference.valid_mask).reshape(SHAPE), state
+        return None, None, None
+
+    def load_observation(self, clock_ns):
+        """Observe the same native response as the colors, before display saturation."""
+        context = self.load_context
+        if context is None:
+            return None
+        frame, valid, state = self._paired_sample(self._responses, clock_ns)
+        if frame is None or not valid.all() or not np.isfinite(frame).all():
+            return None
+        # New and previous references can publish different images with exactly
+        # the same state header at the switch. Start after all rows cross it.
+        if (state.header.frame_id != context.frame_id
+                or min(state.row_realtime_ns) <= context.reference_stamp_ns):
+            return None
+        baseline = np.asarray(self.reference.baseline_adc).reshape(SHAPE)
+        signed = frame * np.sign(np.asarray(state.adc).reshape(SHAPE) - baseline)
+        source_now = int(self.message.snapshot_monotonic_ns) + max(0, clock_ns - self.receive_clock)
+        return LoadObservation(context, tuple(map(int, state.row_monotonic_ns)), source_now,
+                               float(frame.sum(dtype=np.float64)), float(signed.sum(dtype=np.float64)),
+                               float(frame.max()), int(np.count_nonzero(frame)))
 
     def contact_pixels(self, clock_ns):
         image = np.full((ROWS, COLS, 3), INVALID_RGB, dtype=np.uint8)
-        frame, valid = self._paired_frame(self._images, clock_ns)
+        frame, valid, _ = self._paired_sample(self._images, clock_ns)
         if frame is not None:
             image[valid] = frame[valid]
         return image
 
     def contact_response(self, clock_ns):
         amplitude = np.full(SHAPE, np.nan, dtype=np.float32)
-        frame, valid = self._paired_frame(self._responses, clock_ns)
+        frame, valid, _ = self._paired_sample(self._responses, clock_ns)
         if frame is not None:
             amplitude[valid] = frame[valid]
         return amplitude
@@ -158,6 +210,8 @@ class ArrayView:
         self.message = message
         self.receive_clock = clock_ns
         if not message.connected or not message.time_valid:
+            if not message.connected:
+                self._load_reference = None
             self._states.clear()
             self._images.clear()
             self._responses.clear()
@@ -169,6 +223,7 @@ class ArrayView:
 
     def invalidate(self, reason):
         self.reset_stream()
+        self._load_reference = None
         self.rejection = reason
 
     def mask(self, clock_ns):

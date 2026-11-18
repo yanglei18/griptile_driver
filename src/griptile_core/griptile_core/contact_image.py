@@ -48,15 +48,29 @@ def contact_amplitude(response) -> np.ndarray:
     return np.where(valid, values, np.nan)
 
 
-def _check_field(amplitude, span):
+def _check_response(amplitude, span):
     values = np.asarray(amplitude, dtype=float)
-    if values.shape != (ROWS, COLS):
-        raise ValueError("amplitude must have the native 20x20 grid shape")
     if not np.isfinite(span) or span <= 0:
         raise ValueError("span must be finite and positive")
     if np.any(np.isinf(values)) or np.any(values < 0):
         raise ValueError("amplitude must contain nonnegative counts or NaN")
     return values
+
+
+def _check_field(amplitude, span):
+    values = _check_response(amplitude, span)
+    if values.shape != (ROWS, COLS):
+        raise ValueError("amplitude must have the native 20x20 grid shape")
+    return values
+
+
+def contact_intensity_rgb(response_adc, span):
+    """Return the native taxel color for a numeric readout or report."""
+    samples = _check_response([response_adc], span)
+    if samples.shape != (1,):
+        raise ValueError("expected one taxel response")
+    rgb = _color_response(samples, np.isfinite(samples), samples > 0, span)
+    return tuple(int(channel) for channel in rgb[0])
 
 
 def amplitude_rgb(amplitude, span) -> np.ndarray:

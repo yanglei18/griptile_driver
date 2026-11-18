@@ -43,6 +43,21 @@ The three RGB channels encode one tactile response per taxel. The same response 
 ros2 service call /tactile/sensor_0/set_contact_reference griptile_msgs/srv/SetContactReference '{}'
 ```
 
+### Check the display against a known load
+
+Align a force gauge with the normal to the sensing face and keep the indenter and its position fixed. Open **已知载荷验证** in the live viewer. Reuse the current unloaded reference, or acquire one with the jaw open. Enter two gauge readings in newtons, a lower independent check load and a higher calibration load.
+
+| Hold | Gauge reading | Use |
+| --- | --- | --- |
+| Load up | Lower check load | Independent reading during clamping |
+| Load further | Higher calibration load | Fit a single gain using this point and the existing zero |
+| Unload partway | Same lower check load | Check the estimate on unloading against the gauge and the loading reading |
+| Release | Zero | Measure the residual after release |
+
+Once the gauge reaches each reading, click **记录本步**. The high calibration load requires a stable hold. Independent checks retain the first complete measurement window and its variation, including fluctuations on release. A gap in acquisition restarts the current sampling window. The window estimates total normal force on this sensor face from the sum of the 400 native noise-gated responses. The RGB image keeps its ADC scale. A cell above the red endpoint still contributes its full response to the force estimate. The gain is local to this setup. Accuracy between the two fit endpoints must be tested independently. A per-cell pressure scale in kPa requires additional calibration.
+
+Export the JSON report for the signed errors, loading versus unloading difference, release residual, peak response and active cell count. To compare locations or indenters, apply the same check load and use **同载荷复测**. Every repeat uses the original gain. With the default bidirectional contact detector, reverse electrical excursions can also show up as contact on release. The signed response in the report helps identify that behavior. [Example verification window with simulated loads](known-load-check.png)
+
 ## ROS interfaces
 
 The default namespace is `/tactile/sensor_0`. Set a different logical ID with `sensor_id:=jaw_a` to use `/tactile/jaw_a`. The demo runs in `/tactile/demo`.

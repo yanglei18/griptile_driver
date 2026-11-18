@@ -15,15 +15,23 @@ def save_reference(view, path):
     if not binding or view.reference is None:
         raise ValueError("保存参考需要已核验的设备标识和完成的无载参考")
     document = {"version": 1, "binding": binding, "reference": view.reference.to_dict()}
+    save_json_atomic(path, document)
+
+
+def save_json_atomic(path, document):
+    """Publish a complete local JSON export, including when replacing an old file."""
     destination = Path(path)
-    with tempfile.NamedTemporaryFile("w", dir=destination.parent, encoding="utf-8", delete=False) as stream:
-        temporary = stream.name
+    temporary = None
     try:
-        with open(temporary, "w", encoding="utf-8") as stream:
-            json.dump(document, stream, allow_nan=False)
+        with tempfile.NamedTemporaryFile("w", dir=destination.parent, encoding="utf-8",
+                                         delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump(document, stream, ensure_ascii=False, allow_nan=False, indent=2)
+            stream.write("\n")
         os.replace(temporary, destination)
     finally:
-        Path(temporary).unlink(missing_ok=True)
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def load_reference(view, path):

@@ -271,3 +271,107 @@ def test_continuous_mode_png_selection_coordinates_and_native_export(monkeypatch
     assert np.all(window.image.image == INVALID_RGB)
     window.close()
     app.processEvents()
+
+
+def test_load_observation_uses_same_state_and_unclipped_response_at_all_taxels():
+    model = ArrayView(SENSOR)
+    assembler = Assembler(sensor_id=SENSOR)
+    first = snapshot(assembler, 1, START)
+    status = profile_status()
+    status.header = first.header
+    status.direction = "both"
+    status.baseline_adc = [2000.] * 400
+    model.accept_reference(status)
+    model.accept(first, 0)
+    field = np.zeros((20, 20), np.float32)
+    field[2, 5], field[15, 6] = 5100, 200
+    model.accept_response(response(first, field))
+    assert model.load_context is not None
+    assert model.load_observation(0) is None  # Exact ref boundary has ambiguous image provenance.
+
+    t2 = 20_000_000
+    second = snapshot(assembler, 2, START + t2, offset=2500)
+    second.adc = list(second.adc)
+    second.adc[15 * 20 + 6] = 1200
+    model.accept_response(response(second, field))
+    model.accept(second, t2)
+    context = model.load_context
+    rec = model.load_observation(t2)
+    assert rec.context == context and rec.row_stamps == tuple(second.row_monotonic_ns)
+    assert (rec.total_adc, rec.peak_adc, rec.signed_total_adc, rec.active_cells) == (5300, 5100, 4900, 2)
+    model.accept_reference(status)
+    assert model.load_context == context
+    # State may arrive before its field. Pairing an old field against new raw ADC
+    # would incorrectly flip the first taxel's sign here.
+    third = snapshot(assembler, 3, START + 2 * t2)
+    model.accept(third, 2 * t2)
+    older = model.load_observation(2 * t2)
+    assert older.signed_total_adc == 4900 and older.source_now_ns == third.snapshot_monotonic_ns
+    model.accept_response(response(third, field))
+    assert model.load_observation(2 * t2).signed_total_adc == -5300
+    assert model.load_observation(2 * t2 + third.max_age_ns + 1) is None
+
+
+def test_direct_reference_replacement_waits_until_every_row_crosses_the_new_reference():
+    model = ArrayView(SENSOR)
+    assembler = Assembler(sensor_id=SENSOR)
+    state = snapshot(assembler, 1, START)
+    status = profile_status()
+    status.header, status.direction = state.header, "increase"
+    model.accept(state, 0)
+    model.accept_reference(status)
+    context = model.load_context
+
+    elapsed = 10_000_000
+    second = snapshot(assembler, 2, START + elapsed)
+    model.accept(second, elapsed)
+    field = np.zeros((20, 20))
+    model.accept_response(response(second, field))
+    assert model.load_observation(elapsed) is not None
+    replacement = profile_status()
+    replacement.header, replacement.direction = second.header, "increase"
+    model.accept_reference(replacement)
+    assert model.load_context != context
+    for n, rows in [(3, (0, 3)), (4, range(20))]:
+        next_state = snapshot(assembler, n, START + n * elapsed, rows)
+        model.accept(next_state, n * elapsed)
+        model.accept_response(response(next_state, field))
+        if n == 3:
+            assert model.load_observation(n * elapsed) is None
+        else:
+            assert model.load_observation(n * elapsed) is not None
+    replaced = model.load_context
+    replacement.baseline_adc[7] += 1
+    model.accept_reference(replacement)
+    assert model.load_context.reference_digest != replaced.reference_digest
+    # A late earlier ready event cannot revive a profile for the force estimate.
+    model.accept_reference(status)
+    assert model.load_context is None
+    model.accept_reference(replacement)
+    assert model.load_context is not None
+    model.accept_info(info("other-board"))
+    assert model.load_context is None
+
+
+def test_incomplete_force_data_never_becomes_zero_and_disconnect_retires_context():
+    model = ArrayView(SENSOR)
+    assembler = Assembler(sensor_id=SENSOR)
+    first = snapshot(assembler, 1, START)
+    status = profile_status()
+    status.header, status.direction = first.header, "both"
+    model.accept(first, 0)
+    model.accept_reference(status)
+    context = model.load_context
+    second = snapshot(assembler, 2, START + 1)
+    model.accept(second, 1)
+    field = np.zeros((20, 20))
+    field[0, 0] = np.nan
+    model.accept_response(response(second, field))
+    assert model.load_context == context and model.load_observation(1) is None
+    third = snapshot(assembler, 3, START + 2)
+    third.connected = False
+    model.accept(third, 2)
+    assert model.load_context is None
+    fourth = snapshot(assembler, 4, START + 3)
+    model.accept(fourth, 3)
+    assert model.load_context is None
