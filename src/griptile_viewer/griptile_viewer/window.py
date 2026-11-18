@@ -33,37 +33,70 @@ CONTACT_MODE, SURFACE_MODE, RAW_MODE, DELTA_MODE = range(4)
 _LEGACY_UNLOADED_RGB = (255, 255, 255)
 
 
-def _swatch(rgb, label):
-    return '<span style="color:#%02x%02x%02x">■</span> %s' % (*rgb, label)
-
-
-def _contact_legend():
+def _contact_legend(peak):
     legend = QtWidgets.QWidget()
     layout = QtWidgets.QHBoxLayout(legend)
     layout.setContentsMargins(0, 0, 0, 0)
-    layout.addStretch()
-    layout.addWidget(QtWidgets.QLabel(_swatch(UNLOADED_RGB, "无接触")))
-    layout.addSpacing(12)
-    layout.addWidget(QtWidgets.QLabel("弱"))
+    layout.setSpacing(7)
+    layout.addWidget(QtWidgets.QLabel("无载"))
     bar = QtWidgets.QFrame()
     bar.setObjectName("contactGradient")
     stops = ", ".join(f"stop:{position:g} {QtGui.QColor(*rgb).name()}"
                       for position, rgb in CONTACT_COLOR_STOPS)
     bar.setStyleSheet(f"background: qlineargradient(x1:0, y1:0, x2:1, y2:0, {stops});")
-    bar.setMinimumWidth(100)
-    bar.setMaximumWidth(240)
-    bar.setFixedHeight(12)
-    bar.setToolTip("浅蓝灰：无载　浅蓝至青：轻触　绿、黄、橙、红：响应逐渐增强")
+    bar.setMinimumWidth(36)
+    bar.setFixedHeight(6)
+    bar.setToolTip("浅蓝灰表示无载，受压响应增强时依次显为青、绿、黄、橙、红。中灰表示缺测。")
     bar.setAccessibleName("接触强度色带")
     bar.setAccessibleDescription(bar.toolTip())
     layout.addWidget(bar, 1)
-    layout.addWidget(QtWidgets.QLabel("强"))
-    layout.addSpacing(12)
-    missing = QtWidgets.QLabel(_swatch(INVALID_RGB, "缺测"))
-    missing.setToolTip("没有有效测量或无载参考")
-    layout.addWidget(missing)
-    layout.addStretch()
+    layout.addWidget(QtWidgets.QLabel("强接触"))
+    layout.addSpacing(6)
+    layout.addWidget(peak)
     return legend
+
+
+def _peak_label(amplitude, usable, span):
+    if not usable.any():
+        return "峰值 —"
+    ratio = amplitude[usable].max() / span
+    value = "<1%" if 0 < ratio < .01 else f"{ratio:.0%}"
+    label = "峰值" if usable.all() else "局部峰值"
+    return f"{label} {value}"
+
+
+class _MonitorLayout(QtWidgets.QVBoxLayout):
+    """Fit the entire square array and its bezel into either window orientation."""
+
+    def __init__(self, frame, plot):
+        super().__init__()
+        self.frame = frame
+        self.plot = plot
+        self.compact = True
+        self.setContentsMargins(0, 0, 0, 0)
+        self.addWidget(frame)
+
+    def _bezel_size(self):
+        body = self.frame.layout()
+        margins = body.contentsMargins()
+        plot_item = body.itemAt(body.indexOf(self.plot))
+        return margins.left() + margins.right(), body.sizeHint().height() - plot_item.sizeHint().height()
+
+    def minimumSize(self):
+        size = super().minimumSize()
+        if self.compact:
+            horizontal, vertical = self._bezel_size()
+            size.setHeight(max(size.height(), size.width() - horizontal + vertical))
+        return size
+
+    def setGeometry(self, rect):
+        if self.compact:
+            horizontal, vertical = self._bezel_size()
+            side = max(0, min(rect.width() - horizontal, rect.height() - vertical))
+            fitted = QtCore.QRect(0, 0, side + horizontal, side + vertical)
+            fitted.moveCenter(rect.center())
+            rect = fitted
+        super().setGeometry(rect)
 
 
 class ViewerWindow(QtWidgets.QMainWindow):
@@ -76,56 +109,67 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.serial_dialog = None
         self.last_receipt_wall_ns = time.monotonic_ns()
         self.last_message = None
-        self.setWindowTitle(f"GripTile Viewer · {model.sensor_id}")
+        self.setWindowTitle(f"GripTile · 触觉显示 · {model.sensor_id}")
         self.setStyleSheet("""
-            QMainWindow, QStatusBar { background: #182129; }
+            QMainWindow, QStatusBar { background: #151c22; }
             QLabel, QStatusBar { color: #e0e9ed; font-size: 14px; }
-            QLabel#status { font-size: 17px; font-weight: 600; padding: 4px 0; }
+            QFrame#contactMonitor { background: #273038; border-radius: 13px; }
+            QFrame#contactMonitor QLabel { color: #d6dee4; font-size: 12px; }
+            QFrame#contactMonitor QLabel#brand { color: #f0f5f7; font-weight: 600; font-size: 18px; }
             QLabel#reference, QLabel#legend { color: #b9cad2; font-size: 13px; }
             QPushButton, QComboBox, QSpinBox, QToolButton {
                 background: #25343f; color: #e5eef2; border: 1px solid #4a5b65;
                 border-radius: 4px; padding: 5px 9px; min-height: 19px;
             }
             QPushButton:hover { background: #304752; border-color: #7bcbbd; }
-            QPushButton#load { background: #28534f; border-color: #49847c; }
-            QPushButton#load:hover { background: #33645e; }
             QPushButton:disabled, QSpinBox:disabled { color: #90a1ab; background: #202b34; }
             QComboBox QAbstractItemView { color: #e5eef2; background: #25343f; }
         """)
-        self.resize(660, 620)
+        self.resize(560, 620)
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
         layout = QtWidgets.QVBoxLayout(central)
-        layout.setContentsMargins(18, 14, 18, 14)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
+        self.monitor = QtWidgets.QFrame()
+        self.monitor.setObjectName("contactMonitor")
+        monitor_layout = QtWidgets.QVBoxLayout(self.monitor)
+        monitor_layout.setContentsMargins(12, 7, 12, 8)
+        monitor_layout.setSpacing(7)
+        header = QtWidgets.QHBoxLayout()
+        self.brand = QtWidgets.QLabel("GripTile")
+        self.brand.setObjectName("brand")
+        header.addWidget(self.brand)
+        header.addStretch()
         self.status = QtWidgets.QLabel()
         self.status.setObjectName("status")
-        header = QtWidgets.QHBoxLayout()
-        header.addWidget(self.status)
         self.ref_status = QtWidgets.QLabel()
         self.ref_status.setObjectName("reference")
         header.addWidget(self.ref_status)
-        header.addStretch()
+        header.addWidget(self.status)
+        monitor_layout.addLayout(header)
+        actions = QtWidgets.QHBoxLayout()
+        actions.setSpacing(6)
         self.serial_button = QtWidgets.QPushButton("串口设置")
         self.serial_button.setVisible(not model.replay)
         self.serial_button.clicked.connect(self.open_serial_dialog)
-        header.addWidget(self.serial_button)
+        actions.addWidget(self.serial_button)
         self.reference_button = QtWidgets.QPushButton("采集无载参考")
         self.reference_button.setToolTip("保持夹爪无载，采集 3 秒")
         self.reference_button.clicked.connect(self.start_reference)
-        header.addWidget(self.reference_button)
+        actions.addWidget(self.reference_button)
         self.load_dialog = None
         self.load_button = QtWidgets.QPushButton("已知载荷验证")
-        self.load_button.setObjectName("load")
         self.load_button.clicked.connect(self.open_load_dialog)
-        header.addWidget(self.load_button)
+        actions.addWidget(self.load_button)
+        actions.addStretch()
         self.details_button = QtWidgets.QToolButton()
         self.details_button.setText("详情")
         self.details_button.setCheckable(True)
         self.details_button.setArrowType(QtCore.Qt.RightArrow)
         self.details_button.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
         self.details_button.setToolTip("显示模式、单点读数、参考和导出")
-        header.addWidget(self.details_button)
-        layout.addLayout(header)
+        actions.addWidget(self.details_button)
         self.details = QtWidgets.QWidget()
         details_layout = QtWidgets.QVBoxLayout(self.details)
         details_layout.setContentsMargins(0, 0, 0, 0)
@@ -142,7 +186,9 @@ class ViewerWindow(QtWidgets.QMainWindow):
         controls.addWidget(self.span)
         controls.addStretch()
         details_layout.addLayout(controls)
-        self.map = pg.PlotWidget(background="#182129")
+        self.map = pg.PlotWidget(background="#273038")
+        self.map.getPlotItem().layout.setContentsMargins(0, 0, 0, 0)
+        self.map.setMinimumSize(160, 160)
         self.map.setLabel("bottom", "列")
         self.map.setLabel("left", "行")
         self.map.setAspectLocked()
@@ -151,8 +197,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.map.setMouseEnabled(False, False)
         self.map.invertY()
         self.map.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, False)
-        self.map.setXRange(0, COLS, padding=0)
-        self.map.setYRange(0, ROWS, padding=0)
+        self.map.setRange(rect=QtCore.QRectF(0, 0, COLS, ROWS), padding=0)
         ticks = [(n + .5, str(n)) for n in (0, 4, 9, 14, 19)]
         for axis in ("left", "bottom"):
             self.map.getAxis(axis).setTicks([ticks])
@@ -162,12 +207,18 @@ class ViewerWindow(QtWidgets.QMainWindow):
                                     symbolBrush=None, symbolSize=13)
         self.map.scene().sigMouseClicked.connect(self.pick_cell)
         self.map.scene().sigMouseMoved.connect(self.inspect_cell)
-        layout.addWidget(self.map, stretch=4)
-        self.scale = _contact_legend()
-        layout.addWidget(self.scale)
+        monitor_layout.addWidget(self.map, stretch=1)
+        self.peak = QtWidgets.QLabel("峰值 —")
+        self.peak.setTextFormat(QtCore.Qt.PlainText)
+        self.peak.setToolTip("当前有效触点的最大响应，占固定显示量程的百分比")
+        self.scale = _contact_legend(self.peak)
+        monitor_layout.addWidget(self.scale)
         self.source_scale = QtWidgets.QLabel()
         self.source_scale.setAlignment(QtCore.Qt.AlignCenter)
-        layout.addWidget(self.source_scale)
+        monitor_layout.addWidget(self.source_scale)
+        self._monitor_layout = _MonitorLayout(self.monitor, self.map)
+        layout.addLayout(self._monitor_layout, stretch=4)
+        layout.addLayout(actions)
         self.cell_label = QtWidgets.QLabel("点击单元查看曲线")
         details_layout.addWidget(self.cell_label)
         self.curve = pg.PlotWidget(background="#171b21")
@@ -198,6 +249,8 @@ class ViewerWindow(QtWidgets.QMainWindow):
 
     def _show_details(self, expanded):
         self.details.setVisible(expanded)
+        self._monitor_layout.compact = not expanded
+        self._monitor_layout.invalidate()
         self.details_button.setArrowType(QtCore.Qt.DownArrow if expanded else QtCore.Qt.RightArrow)
         for axis in ("left", "bottom"):
             self.map.showAxis(axis, expanded)
@@ -343,7 +396,9 @@ class ViewerWindow(QtWidgets.QMainWindow):
                 frame = self._surface(amplitude, span) if surface else amplitude_rgb(amplitude, span)
                 usable = np.isfinite(amplitude)
                 active = amplitude > 0
+                self.peak.setText(_peak_label(amplitude, usable, span))
             else:
+                self.peak.setText("峰值 —")
                 frame = model.contact_pixels(now)
                 usable = np.any(frame != INVALID_RGB, axis=2)
                 unloaded = np.all(frame == UNLOADED_RGB, axis=2)
@@ -392,7 +447,10 @@ class ViewerWindow(QtWidgets.QMainWindow):
         elif not valid.any():
             state = "等待新数据"
         else:
-            state = "已连接"
+            state = "播放中" if model.replay else "已连接"
+            coverage = usable if contact and model.reference is not None else valid
+            if not coverage.all():
+                state += f" · 有效 {coverage.sum()}/{ROWS * COLS}"
         self.status.setText(f"{'回放' if model.replay else '实时'} · {state}")
         status = model.current_reference
         phase = status.phase if status else "unreferenced"

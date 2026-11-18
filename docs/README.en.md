@@ -37,7 +37,7 @@ The live viewer uses source-matched scalar responses to color both contact views
 
 The native **接触图 RGB** view magnifies the pixels with nearest-neighbor sampling. Contact-mode PNG export writes the original 20×20 RGB image. The contact footprint counts responding cells; conversion to physical area requires sensor dimensions. Intensity is a noise-gated ADC change; force or pressure units require physical calibration. Raw ADC and signed delta views, per-cell traces and CSV export remain available. Saved references can be reused with a verified matching device and layout.
 
-The default **连续接触面（估算）** view displays the same 400 taxels as a 300×300 RGB surface. The viewer interpolates noise-gated ADC amplitudes between neighboring taxel centers and estimates the contact outline from their active flags. Unknown regions stay gray. Colors at all 400 measured centers match the native grid. Picking, time series and contact counts still use the original addresses. The surface view exports a 300×300 PNG. Both views share the same unloaded reference.
+The live window opens on a square **连续接触面（估算）** display with its fixed color scale. The peak readout gives the strongest available taxel response as a percentage of the display span. A driver with a ready unloaded reference can be used immediately. The surface renders the same 400 taxels at 300×300 RGB. The viewer interpolates noise-gated ADC amplitudes between neighboring taxel centers and estimates the contact outline from their active flags. Unknown regions stay gray. Colors at all 400 measured centers match the native grid. Picking, time series and contact counts still use the original addresses. The surface view exports a 300×300 PNG. Both views share the same unloaded reference.
 
 ![Native and interpolated views of the same simulated ring and three broad ridges](contact-surface-comparison.png)
 
@@ -63,6 +63,8 @@ Follow the single action shown for each step and capture when the gauge reaches 
 The result compares the two peak colors and force estimates at the same gauge reading and shows the residual after release. Open the details to inspect individual signed errors and export the JSON report. To compare locations or indenters, apply the same check load and use **同载荷复测**. Every repeat uses the original gain. With the default bidirectional contact detector, reverse electrical excursions can also show up as contact on release. The signed response in the report helps identify that behavior. [Example verification window with simulated loads](known-load-check.png)
 
 ## ROS interfaces
+
+For CV, read the 20×20 raw ADC and validity mask from `state`, or use the native float32 contact amplitudes from `contact_response`. Both use the sensor grid coordinates.
 
 The default namespace is `/tactile/sensor_0`. Set a different logical ID with `sensor_id:=jaw_a` to use `/tactile/jaw_a`. The demo runs in `/tactile/demo`.
 

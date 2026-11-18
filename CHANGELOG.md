@@ -12,3 +12,4 @@
 - Focus the live viewer on the contact surface and the load check on the loading/unloading comparison and release residual. Put diagnostics and exports in expandable details.
 - Configure the live driver’s serial port and baud rate from the viewer, with passive discovery, connection status and explicit disconnect.
 - Use a light blue-gray idle surface and a gradual low-response color ramp in the contact images, viewer and exports.
+- Present the live contact surface in a square display with a shared intensity scale, measured peak readout and direct access to serial settings.

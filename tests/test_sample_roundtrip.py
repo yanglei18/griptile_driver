@@ -304,7 +304,7 @@ def test_recorded_reference_rebuilds_native_contact_image(tmp_path, monkeypatch)
 def test_known_load_window_uses_the_drivers_unclipped_samples(qt_app, open_window, tmp_path, monkeypatch):
     """Send wire data through the installed launch, zero service and actual Qt hold buttons."""
     import numpy as np
-    from griptile_core.contact_image import SURFACE_SCALE, contact_intensity_rgb
+    from griptile_core.contact_image import SURFACE_SCALE, amplitude_rgb, contact_intensity_rgb
     from griptile_viewer.app import ViewerNode
     from griptile_viewer.window import QtWidgets, SURFACE_MODE
 
@@ -361,6 +361,24 @@ def test_known_load_window_uses_the_drivers_unclipped_samples(qt_app, open_windo
             feed(0, lambda: node.reference_client.service_is_ready() and node.model.mask(node.view_clock()).all())
             window.reference_button.click()
             feed(0, lambda: total_is(0))
+            # Exercise the main display with the same installed driver and data a CV
+            # subscriber sees, including a value above the display's red endpoint.
+            assert window.mode.currentIndex() == SURFACE_MODE and not window.details.isVisible()
+            for delta, peak in [(6, "<1%"), (30, "1%"), (3300, "110%"), (0, "0%")]:
+                feed(delta, lambda: total_is(2 * delta))
+                adc = idle.copy()
+                field = np.zeros((20, 20), np.float32)
+                if delta:
+                    adc[4, 8], adc[12, 3] = 18000 + delta + 2, 18000 + delta + 1
+                    field[4, 8], field[12, 3] = delta + .5, delta - .5
+                np.testing.assert_array_equal(np.asarray(node.model.message.adc).reshape(20, 20), adc)
+                measured = node.model.contact_response(node.view_clock())
+                assert measured.dtype == np.float32
+                np.testing.assert_array_equal(measured, field)
+                center = SURFACE_SCALE // 2
+                np.testing.assert_array_equal(window.image.image[center::SURFACE_SCALE, center::SURFACE_SCALE],
+                                              amplitude_rgb(field, 3000))
+                assert window.peak.text() == f"峰值 {peak}"
             window.load_button.click()
             dialog = window.load_dialog
             dialog.check_force.setValue(2)

@@ -177,6 +177,10 @@ def test_compact_contact_screen_and_reference_action_follow_source_state(qt_app,
     window = open_window(model, clock_ns=lambda: 0, request_reference=lambda *_: None)
     size = window.size()
     assert window.load_button.isVisible() and window.scale.isVisible()
+    assert window.serial_button.isVisible()
+    assert window.brand.isVisible() and window.brand.text() == "GripTile"
+    assert window.monitor.isAncestorOf(window.scale) and window.monitor.isAncestorOf(window.map)
+    assert window.peak.isVisible() and window.peak.text() == "峰值 —"
     assert not window.reference_button.isVisible() and not window.ref_status.text()
     assert not window.details.isVisible() and not window.map.getAxis("left").isVisible()
     assert not window.marker.isVisible()
@@ -203,6 +207,26 @@ def test_compact_contact_screen_and_reference_action_follow_source_state(qt_app,
     assert window.mode.currentIndex() == SURFACE_MODE and window.scale.isVisible()
     assert not window.curve.isVisible() and not window.marker.isVisible()
     assert window.size() == size and window.map.height() == compact_height
+
+
+def test_compact_display_fits_the_entire_square_array_when_resized(qt_app, open_window):
+    model = ArrayView(SENSOR)
+    window = open_window(model)
+    for width, height in ((800, 480), (400, 700), (600, 600)):
+        window.resize(width, height)
+        qt_app.processEvents()
+        screen = window.map.viewport()
+        field = window.image.mapRectToScene(window.image.boundingRect())
+        assert abs(screen.width() - screen.height()) <= 2
+        assert abs(field.width() - field.height()) <= 1
+        assert .92 * screen.width() <= field.width() <= screen.width() + 1
+        assert field.left() >= -1 and field.right() <= screen.width() + 1
+        assert field.top() >= -1 and field.bottom() <= screen.height() + 1
+        # The acquisition and inspection controls remain reachable in either orientation.
+        for button in (window.serial_button, window.load_button, window.details_button):
+            assert button.isVisibleTo(window)
+            rect = button.rect().translated(button.mapTo(window, button.rect().topLeft()))
+            assert window.rect().contains(rect)
 
 
 def response(state, amplitude, *, bigendian=False):
@@ -332,6 +356,7 @@ def test_continuous_mode_png_selection_coordinates_and_native_export(open_window
     assert not (window.map.renderHints() & QtGui.QPainter.SmoothPixmapTransform)
     window.refresh()
     assert window.scale.isVisible()
+    assert window.peak.text() == "局部峰值 120%"
     assert f"接触 {len(levels)} 点" in window.legend.text() and "399/400" in window.legend.text()
     original = window.image.image
     assert original.shape == (300, 300, 3)
@@ -368,6 +393,7 @@ def test_continuous_mode_png_selection_coordinates_and_native_export(open_window
     window.mode.setCurrentIndex(SURFACE_MODE)
     window.refresh()
     assert np.all(window.image.image == INVALID_RGB)
+    assert window.peak.text() == "峰值 —"
 
 
 def test_load_observation_uses_same_state_and_unclipped_response_at_all_taxels():
