@@ -7,11 +7,13 @@ from .grid import COLS, ROWS
 
 DEFAULT_CONTACT_SPAN = 3000.0  # Noise-gated ADC counts at full red.
 INVALID_RGB = (128, 128, 128)
-UNLOADED_RGB = (255, 255, 255)
-# Fractions of the configured display span, for positive responses only.
-# Zero response and missing measurements have their own colors above.
+UNLOADED_RGB = (224, 233, 239)
+# The first active color is one red-channel code below unloaded. Even a
+# sub-quantization response retains its contact flag in an RGB-only image.
 CONTACT_COLOR_STOPS = (
-    (0.0, (36, 64, 164)),
+    (0.0, (223, 233, 239)),
+    (0.05, (201, 221, 234)),
+    (0.12, (128, 199, 224)),
     (0.2, (0, 176, 205)),
     (0.4, (34, 176, 100)),
     (0.6, (246, 217, 60)),

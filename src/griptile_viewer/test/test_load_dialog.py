@@ -12,11 +12,7 @@ from griptile_viewer.model import ArrayView
 
 
 @pytest.fixture
-def bench(monkeypatch):
-    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
-    from griptile_viewer.window import QtWidgets, ViewerWindow
-
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+def bench(monkeypatch, open_window):
     clock = SimpleNamespace(now=1_000_000_000)
     context = LoadContext("jaw", "session", 1, "board", LAYOUT_ID, "both", 3000., "jaw", 42, "abc", 1)
     model = ArrayView("jaw")
@@ -31,9 +27,7 @@ def bench(monkeypatch):
 
     monkeypatch.setattr(model, "load_observation", observe)
     requests = []
-    window = ViewerWindow(model, clock_ns=lambda: clock.now, request_reference=requests.append)
-    window.show()
-    app.processEvents()
+    window = open_window(model, clock_ns=lambda: clock.now, request_reference=requests.append)
     window.load_button.click()
     dialog = window.load_dialog
     dialog.wall_clock = lambda: clock.now
@@ -51,9 +45,7 @@ def bench(monkeypatch):
             window.refresh()
         assert dialog.capture is None
 
-    yield window, dialog, source, clock, hold
-    window.close()
-    app.processEvents()
+    return window, dialog, source, clock, hold
 
 
 def test_verify_loading_release_recheck_and_export(bench, monkeypatch, tmp_path):
@@ -174,14 +166,11 @@ def test_wait_for_reference_partial_frames_cancel_and_resume(bench):
     assert not dialog.capture_button.isEnabled() and not dialog.zero_button.isVisible()
 
 
-def test_incomplete_reference_can_be_recaptured_from_the_dialog(monkeypatch):
-    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+def test_incomplete_reference_can_be_recaptured_from_the_dialog(open_window):
     from griptile_core.assembler import Assembler
     from griptile_core.protocol import Block
     from griptile_core.serial_source import Batch
-    from griptile_viewer.window import QtWidgets, ViewerWindow
 
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     model = ArrayView("jaw")
     assembler = Assembler(sensor_id="jaw")
     t = 2_000_000_000
@@ -197,9 +186,7 @@ def test_incomplete_reference_can_be_recaptured_from_the_dialog(monkeypatch):
                                 valid_mask=[True] * 399 + [False])
     model.accept_reference(reference)
     requests = []
-    window = ViewerWindow(model, clock_ns=lambda: 0, request_reference=requests.append)
-    window.show()
-    app.processEvents()
+    window = open_window(model, clock_ns=lambda: 0, request_reference=requests.append)
     window.load_button.click()
     dialog = window.load_dialog
     assert model.load_context is not None
@@ -207,5 +194,3 @@ def test_incomplete_reference_can_be_recaptured_from_the_dialog(monkeypatch):
     assert dialog.zero_button.isVisible() and dialog.zero_button.isEnabled()
     dialog.zero_button.click()
     assert requests == [None]
-    window.close()
-    app.processEvents()

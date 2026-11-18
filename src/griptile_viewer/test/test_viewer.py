@@ -127,15 +127,8 @@ def test_rgb_pairs_either_arrival_order_and_expires_without_receipt_clock_extens
     assert np.all(model.contact_pixels(120_000_000) == INVALID_RGB)
 
 
-@pytest.fixture
-def app(monkeypatch):
-    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
-    from griptile_viewer.window import pg
-    return pg.mkQApp()
-
-
-def test_qt_native_rgb_png_and_diagnostic_modes(app, tmp_path):
-    from griptile_viewer.window import CONTACT_MODE, DELTA_MODE, RAW_MODE, QtGui, ViewerWindow
+def test_qt_native_rgb_png_and_diagnostic_modes(open_window, tmp_path):
+    from griptile_viewer.window import CONTACT_MODE, DELTA_MODE, RAW_MODE, QtGui
 
     model = ArrayView(SENSOR)
     state = snapshot(Assembler(sensor_id=SENSOR), 1, START, (0, 2))
@@ -147,9 +140,7 @@ def test_qt_native_rgb_png_and_diagnostic_modes(app, tmp_path):
     pixels[2, 7] = WEAK_RGB
     model.accept_image(image(state, pixels))
     requests = []
-    window = ViewerWindow(model, clock_ns=lambda: 0, request_reference=requests.append)
-    window.show()
-    app.processEvents()
+    window = open_window(model, clock_ns=lambda: 0, request_reference=requests.append)
     window.details_button.click()
     model.select(2, 3)
     window.mode.setCurrentIndex(CONTACT_MODE)
@@ -177,17 +168,13 @@ def test_qt_native_rgb_png_and_diagnostic_modes(app, tmp_path):
     window.reference_button.click()
     assert requests == [None]
     assert window.mode.currentIndex() == CONTACT_MODE
-    window.close()
-    app.processEvents()
 
 
-def test_compact_contact_screen_and_reference_action_follow_source_state(app):
-    from griptile_viewer.window import RAW_MODE, SURFACE_MODE, ViewerWindow
+def test_compact_contact_screen_and_reference_action_follow_source_state(qt_app, open_window):
+    from griptile_viewer.window import RAW_MODE, SURFACE_MODE
 
     model = ArrayView(SENSOR)
-    window = ViewerWindow(model, clock_ns=lambda: 0, request_reference=lambda *_: None)
-    window.show()
-    app.processEvents()
+    window = open_window(model, clock_ns=lambda: 0, request_reference=lambda *_: None)
     size = window.size()
     assert window.load_button.isVisible() and window.scale.isVisible()
     assert not window.reference_button.isVisible() and not window.ref_status.text()
@@ -204,7 +191,7 @@ def test_compact_contact_screen_and_reference_action_follow_source_state(app):
     assert not window.reference_button.isVisible() and "就绪" in window.ref_status.text()
 
     window.details_button.click()
-    app.processEvents()
+    qt_app.processEvents()
     assert all(widget.isVisible() for widget in (window.mode, window.curve, window.png_button,
                                                   window.reference_button, window.cell_label))
     assert window.marker.isVisible() and window.map.getAxis("left").isVisible()
@@ -212,17 +199,86 @@ def test_compact_contact_screen_and_reference_action_follow_source_state(app):
     window.refresh()
     assert not window.scale.isVisible()
     window.details_button.click()
-    app.processEvents()
+    qt_app.processEvents()
     assert window.mode.currentIndex() == SURFACE_MODE and window.scale.isVisible()
     assert not window.curve.isVisible() and not window.marker.isVisible()
     assert window.size() == size and window.map.height() == compact_height
-    window.close()
 
 
 def response(state, amplitude, *, bigendian=False):
     data = np.asarray(amplitude, dtype=">f4" if bigendian else "<f4").tobytes()
     return SimpleNamespace(header=state.header, height=20, width=20, encoding="32FC1", step=80,
                            is_bigendian=bigendian, data=data)
+
+
+@pytest.mark.parametrize("replay", [False, True])
+def test_live_native_uses_matched_response_and_recorded_rgb_retains_its_own_colors(open_window, replay):
+    from griptile_viewer.window import CONTACT_MODE, SURFACE_MODE
+
+    model = ArrayView(SENSOR, replay=replay)
+    assembler = Assembler(sensor_id=SENSOR)
+    first = snapshot(assembler, 1, START)
+    model.accept(first, 0)
+    status = profile_status()
+    status.span_adc = 1800.
+    model.accept_reference(status)
+    original = np.full((20, 20, 3), 255, np.uint8)
+    original[0, 0] = (36, 64, 164)
+    original[1, 0] = INVALID_RGB
+    model.accept_image(image(first, original))
+    field = np.zeros((20, 20), dtype=np.float32)
+    field[0, 0] = 0.05 * status.span_adc
+    field[9, 9] = .01  # Visible strength is near zero; the measured contact is still counted.
+    field[1, 0] = np.nan
+    # This unpaired field must never color pixels at the earlier acquisition stamp.
+    following = snapshot(assembler, 2, START + 40_000_000)
+    model.accept_response(response(following, field))
+    model.accept_response(response(first, np.full_like(field, np.nan)))
+    now = 0
+    window = open_window(model, clock_ns=lambda: now)
+    window.details_button.click()
+    window.mode.setCurrentIndex(CONTACT_MODE)
+    window.refresh()
+    np.testing.assert_array_equal(window.image.image, original)
+    assert "接触 1 点" in window.legend.text()
+    assert window.source_scale.isVisible() and "白色无载" in window.source_scale.text()
+    model.accept_response(response(first, field))
+    window.refresh()
+    native = amplitude_rgb(field, status.span_adc)
+    np.testing.assert_array_equal(window.image.image, original if replay else native)
+    assert f"接触 {1 if replay else 2} 点" in window.legend.text() and "399/400" in window.legend.text()
+    assert window.scale.isVisible() == (not replay)
+    window.mode.setCurrentIndex(SURFACE_MODE)
+    window.refresh()
+    np.testing.assert_array_equal(window.image.image[7::15, 7::15], native)
+    assert window.scale.isVisible() and not window.source_scale.isVisible()
+    now = 100_000_001
+    window.mode.setCurrentIndex(CONTACT_MODE)
+    window.refresh()
+    assert np.all(window.image.image == INVALID_RGB)
+    # A fresh old-palette image outlives the measured field. Live native must
+    # indicate missing data until a new measurement arrives in this acquisition.
+    fresh = snapshot(assembler, 3, START + now)
+    model.accept(fresh, now)
+    model.accept_image(image(fresh, original))
+    window.refresh()
+    if replay:
+        np.testing.assert_array_equal(window.image.image, original)
+    else:
+        assert np.all(window.image.image == INVALID_RGB)
+        assert "0/400" in window.legend.text()
+    model.accept_response(response(fresh, field))
+    window.refresh()
+    np.testing.assert_array_equal(window.image.image, original if replay else native)
+
+    # A different acquisition can legitimately publish only historical RGB.
+    now += 1
+    replacement = snapshot(assembler, 4, START + now, epoch=2)
+    model.accept(replacement, now)
+    model.accept_reference(profile_status(epoch=2))
+    model.accept_image(image(replacement, original))
+    window.refresh()
+    np.testing.assert_array_equal(window.image.image, original)
 
 
 @pytest.mark.parametrize("bigendian", [False, True])
@@ -249,8 +305,8 @@ def test_response_matches_source_stamp_reference_and_freshness(bigendian):
     assert np.isnan(model.contact_response(150_000_001)).all()
 
 
-def test_continuous_mode_png_selection_coordinates_and_native_export(app, tmp_path):
-    from griptile_viewer.window import CONTACT_MODE, SURFACE_MODE, QtCore, QtGui, QtWidgets, ViewerWindow
+def test_continuous_mode_png_selection_coordinates_and_native_export(open_window, tmp_path):
+    from griptile_viewer.window import CONTACT_MODE, SURFACE_MODE, QtCore, QtGui, QtWidgets
 
     model = ArrayView(SENSOR)
     assembler = Assembler(sensor_id=SENSOR)
@@ -261,25 +317,26 @@ def test_continuous_mode_png_selection_coordinates_and_native_export(app, tmp_pa
     model.accept_reference(status)
     field = np.zeros((20, 20), dtype=np.float32)
     # The decoder and the viewer must use this reference's scale in both contact modes.
-    field[3, 7:13] = [1, 400, 800, 1200, 1600, 2400]
+    levels = [max(position, 1.e-6) * status.span_adc for position, _ in CONTACT_COLOR_STOPS]
+    levels[-1] *= 1.2  # The same color also represents a response above the display range.
+    swatches = slice(7, 7 + len(levels))
+    field[3, swatches] = levels
     field[10, 1] = np.nan
     native = amplitude_rgb(field, status.span_adc)
     model.accept_image(image(state, native))
     model.accept_response(response(state, field))
     clock_ns = 0
     requests = []
-    window = ViewerWindow(model, clock_ns=lambda: clock_ns, request_reference=requests.append)
+    window = open_window(model, clock_ns=lambda: clock_ns, request_reference=requests.append)
     assert window.mode.currentIndex() == SURFACE_MODE
     assert not (window.map.renderHints() & QtGui.QPainter.SmoothPixmapTransform)
-    window.show()
-    app.processEvents()
     window.refresh()
     assert window.scale.isVisible()
-    assert "接触 6 点" in window.legend.text() and "399/400" in window.legend.text()
+    assert f"接触 {len(levels)} 点" in window.legend.text() and "399/400" in window.legend.text()
     original = window.image.image
     assert original.shape == (300, 300, 3)
     np.testing.assert_array_equal(original[7::15, 7::15], native)
-    np.testing.assert_array_equal(native[3, 7:13], [rgb for _, rgb in CONTACT_COLOR_STOPS])
+    np.testing.assert_array_equal(native[3, swatches], [rgb for _, rgb in CONTACT_COLOR_STOPS])
     gradient = window.scale.findChild(QtWidgets.QFrame, "contactGradient").grab().toImage()
     for position, rgb in CONTACT_COLOR_STOPS:
         x = round(position * (gradient.width() - 1))
@@ -303,7 +360,7 @@ def test_continuous_mode_png_selection_coordinates_and_native_export(app, tmp_pa
     window.mode.setCurrentIndex(CONTACT_MODE)
     window.refresh()
     np.testing.assert_array_equal(window.image.image, native)
-    assert "接触 6 点" in window.legend.text() and "399/400" in window.legend.text()
+    assert f"接触 {len(levels)} 点" in window.legend.text() and "399/400" in window.legend.text()
     path = tmp_path / "native.png"
     window.save_png(path)
     assert QtGui.QImage(str(path)).size() == QtCore.QSize(20, 20)
@@ -311,8 +368,6 @@ def test_continuous_mode_png_selection_coordinates_and_native_export(app, tmp_pa
     window.mode.setCurrentIndex(SURFACE_MODE)
     window.refresh()
     assert np.all(window.image.image == INVALID_RGB)
-    window.close()
-    app.processEvents()
 
 
 def test_load_observation_uses_same_state_and_unclipped_response_at_all_taxels():

@@ -27,6 +27,7 @@ class ArrayView:
         self._states = deque(maxlen=4)
         self._images = deque(maxlen=4)
         self._responses = deque(maxlen=4)
+        self._has_measured_response = False
         self._load_reference = None
         self._load_revision = 0
         self._load_watermark = None
@@ -45,6 +46,7 @@ class ArrayView:
         self._states.clear()
         self._images.clear()
         self._responses.clear()
+        self._has_measured_response = False
         self.trend.clear()
         self.message = None
         self.identity = None
@@ -172,12 +174,15 @@ class ArrayView:
             image[valid] = frame[valid]
         return image
 
-    def contact_response(self, clock_ns):
-        amplitude = np.full(SHAPE, np.nan, dtype=np.float32)
+    def contact_response(self, clock_ns, *, allow_rgb_fallback=False):
+        """Prefer native measurements for the rest of an acquisition once observed."""
         frame, valid, _ = self._paired_sample(self._responses, clock_ns)
-        if frame is not None:
-            amplitude[valid] = frame[valid]
-        return amplitude
+        if frame is not None and (valid & np.isfinite(frame)).any():
+            self._has_measured_response = True
+            return np.where(valid, frame, np.nan)
+        if allow_rgb_fallback and not self._has_measured_response:
+            return None
+        return np.full(SHAPE, np.nan, dtype=np.float32)
 
     def accept(self, message, clock_ns):
         if message.sensor_id != self.sensor_id:

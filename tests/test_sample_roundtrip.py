@@ -266,7 +266,7 @@ def test_recorded_reference_rebuilds_native_contact_image(tmp_path, monkeypatch)
             feed(idle, result.done, "capture request timed out")
             assert result.result().success, result.result().message
             feed(idle, lambda: bool(refs[-1].phase == "ready" and all(refs[-1].valid_mask)
-                                    and np.all(pixels(images[-1]) == UNLOADED_RGB)), "no unloaded white image")
+                                    and np.all(pixels(images[-1]) == UNLOADED_RGB)), "no unloaded contact image")
             with running(["ros2", "bag", "record", "-s", "mcap", "-o", str(bag),
                           "--qos-profile-overrides-path", str(QOS_PATH), "--topics",
                           NS + "/samples", NS + "/info", NS + "/contact_reference"], tmp_path / "contact-record.log"):
@@ -301,25 +301,23 @@ def test_recorded_reference_rebuilds_native_contact_image(tmp_path, monkeypatch)
         rclpy.shutdown()
 
 
-def test_known_load_window_uses_the_drivers_unclipped_samples(tmp_path, monkeypatch):
+def test_known_load_window_uses_the_drivers_unclipped_samples(qt_app, open_window, tmp_path, monkeypatch):
     """Send wire data through the installed launch, zero service and actual Qt hold buttons."""
     import numpy as np
     from griptile_core.contact_image import SURFACE_SCALE, contact_intensity_rgb
     from griptile_viewer.app import ViewerNode
-    from griptile_viewer.window import QtWidgets, SURFACE_MODE, ViewerWindow
+    from griptile_viewer.window import QtWidgets, SURFACE_MODE
 
     monkeypatch.setenv("ROS_DOMAIN_ID", str(120 + os.getpid() % 17))
     monkeypatch.setenv("ROS_AUTOMATIC_DISCOVERY_RANGE", "LOCALHOST")
     monkeypatch.setenv("ROS_LOG_DIR", str(tmp_path / "logs"))
-    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     master, slave = os.openpty()
     port = os.ttyname(slave)
     os.close(slave)
     os.set_blocking(master, False)
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     rclpy.init(args=["--ros-args", "-r", "__ns:=" + NS])
     node = ViewerNode()
-    window = ViewerWindow(node.model, node.view_clock, node.request_reference)
+    window = open_window(node.model, node.view_clock, node.request_reference)
     idle = np.full((20, 20), 18000)
     pending = b""
     next_scan = next_draw = 0.0
@@ -347,7 +345,7 @@ def test_known_load_window_uses_the_drivers_unclipped_samples(tmp_path, monkeypa
             rclpy.spin_once(node, timeout_sec=0.002)
             if now >= next_draw:
                 window.refresh()
-                app.processEvents()
+                qt_app.processEvents()
                 next_draw = now + 0.033
                 if predicate():
                     return
@@ -360,7 +358,6 @@ def test_known_load_window_uses_the_drivers_unclipped_samples(tmp_path, monkeypa
     try:
         with running(["ros2", "launch", "griptile_driver", "sensor.launch.py", "port:=" + port],
                      tmp_path / "known-load-driver.log"):
-            window.show()
             feed(0, lambda: node.reference_client.service_is_ready() and node.model.mask(node.view_clock()).all())
             window.reference_button.click()
             feed(0, lambda: total_is(0))
@@ -396,23 +393,19 @@ def test_known_load_window_uses_the_drivers_unclipped_samples(tmp_path, monkeypa
             assert report["holds"]["release"]["signed_total_adc"] == -200
             assert np.isclose(report["extra_checks"][0]["error_n"], 0.2)
     finally:
-        window.close()
         node.destroy_node()
         rclpy.shutdown()
         os.close(master)
 
 
-def test_serial_controls_switch_live_ports_and_clear_the_reference(tmp_path, monkeypatch):
+def test_serial_controls_switch_live_ports_and_clear_the_reference(qt_app, open_window, tmp_path, monkeypatch):
     """Configure an initially idle installed driver from Qt, using two distinct PTYs."""
     import termios
     from griptile_viewer.app import ViewerNode
-    from griptile_viewer.window import QtWidgets, ViewerWindow
 
     monkeypatch.setenv("ROS_DOMAIN_ID", str(138 + os.getpid() % 15))
     monkeypatch.setenv("ROS_AUTOMATIC_DISCOVERY_RANGE", "LOCALHOST")
     monkeypatch.setenv("ROS_LOG_DIR", str(tmp_path / "logs"))
-    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     with contextlib.ExitStack() as cleanup:
         def make_array(value):
             master, slave = os.openpty()
@@ -431,10 +424,8 @@ def test_serial_controls_switch_live_ports_and_clear_the_reference(tmp_path, mon
         cleanup.callback(rclpy.shutdown)
         node = ViewerNode()
         cleanup.callback(node.destroy_node)
-        window = ViewerWindow(node.model, node.view_clock, node.request_reference,
-                              serial_control=node.serial_control)
-        cleanup.callback(window.close)
-        window.show()
+        window = open_window(node.model, node.view_clock, node.request_reference,
+                             serial_control=node.serial_control)
         window.serial_button.click()
         dialog = window.serial_dialog
         assert dialog.isVisible()
@@ -454,7 +445,7 @@ def test_serial_controls_switch_live_ports_and_clear_the_reference(tmp_path, mon
                         pending = pending[os.write(master, pending):]
                     except BlockingIOError:
                         pass
-                app.processEvents()
+                qt_app.processEvents()
                 window.refresh()
                 if predicate():
                     return

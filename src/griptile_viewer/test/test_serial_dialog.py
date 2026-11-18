@@ -28,18 +28,9 @@ class Control:
 
 
 @pytest.fixture
-def viewer(monkeypatch):
-    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
-    from griptile_viewer.window import pg, ViewerWindow
-
-    app = pg.mkQApp()
+def viewer(open_window):
     control = Control()
-    window = ViewerWindow(ArrayView("jaw"), serial_control=control)
-    window.show()
-    app.processEvents()
-    yield window, control
-    window.close()
-    app.processEvents()
+    return open_window(ArrayView("jaw"), serial_control=control), control
 
 
 def test_port_controls_appear_on_compact_live_window_and_manage_connection(viewer):
@@ -93,7 +84,7 @@ def test_refresh_preserves_manual_input_and_distinguishes_an_error_from_live_sam
     assert not dialog.connect_button.isEnabled()
 
 
-def test_wait_for_service_reopen_and_replay(viewer):
+def test_wait_for_service_reopen_and_replay(viewer, open_window):
     window, control = viewer
     control.available = False
     window.serial_button.click()
@@ -107,14 +98,10 @@ def test_wait_for_service_reopen_and_replay(viewer):
     window.refresh()
     window.serial_button.click()
     assert window.serial_dialog is dialog and len(control.calls) == 2
-    from griptile_viewer.window import ViewerWindow
-
-    replay = ViewerWindow(ArrayView("jaw", replay=True), serial_control=control)
-    replay.show()
+    replay = open_window(ArrayView("jaw", replay=True), serial_control=control)
     assert not replay.serial_button.isVisible()
     replay.open_serial_dialog()
     assert replay.serial_dialog is None
-    replay.close()
 
 
 @pytest.mark.parametrize("reason,hint", [

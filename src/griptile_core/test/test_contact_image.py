@@ -99,14 +99,42 @@ def test_fixed_colors_are_independent_of_other_taxels_and_clip_only_at_full_scal
 
 
 @pytest.mark.parametrize("span", [1000., 3000.])
-def test_blue_on_first_contact_and_red_at_saturation_with_a_configured_span(span):
+def test_first_contact_is_adjacent_to_unloaded_at_any_span(span):
     field = np.zeros((ROWS, COLS))
     field[0, :5] = [np.nan, 0, 1.e-6 * span, span, span * 2]
     np.testing.assert_array_equal(amplitude_rgb(field, span)[0, :5], [
-        (128, 128, 128), (255, 255, 255), (36, 64, 164), (220, 35, 38), (220, 35, 38),
+        INVALID_RGB, UNLOADED_RGB, WEAK_RGB, STRONG_RGB, STRONG_RGB,
     ])
-    field[0, 5] = 0.2 * span
-    np.testing.assert_array_equal(amplitude_rgb(field, span)[0, 5], (0, 176, 205))
+    assert np.abs(np.subtract(UNLOADED_RGB, WEAK_RGB)).sum() == 1
+
+
+def test_detected_contact_ramps_in_and_out_without_a_dark_onset():
+    detector = calibrated()
+    raw_deltas = [0, 10, 11, 35, 155, 365, 605, 365, 155, 35, 11, 6, 5]
+    colors = []
+    for stamp, delta in enumerate(raw_deltas, start=1):
+        values = BASELINE.copy()
+        values[0] += delta
+        colors.append(tuple(image(detector, values, time=stamp)[0, 0]))
+    # The ten-count activation threshold and five-count release threshold
+    # give net responses of 6, 30, 150, 360 and 600 counts while loading.
+    assert colors[0] == colors[1] == colors[-1] == UNLOADED_RGB
+    first = np.abs(np.subtract(UNLOADED_RGB, colors[2]))
+    assert 0 < first.max() <= 2
+    assert colors[3:7] == [(219, 231, 238), (201, 221, 234), (128, 199, 224), (0, 176, 205)]
+    assert colors[7:11] == list(reversed(colors[2:6]))
+    assert colors[-2] == WEAK_RGB
+
+
+def test_faint_contact_preserves_the_same_surface_footprint_as_strong_contact():
+    field = np.zeros((ROWS, COLS))
+    field[2:6, 5:10] = 1
+    field[3, 7] = 0
+    field[1] = np.nan
+    faint = contact_surface_rgb(field, DEFAULT_CONTACT_SPAN)
+    strong = contact_surface_rgb(field * DEFAULT_CONTACT_SPAN, DEFAULT_CONTACT_SPAN)
+    for color in (UNLOADED_RGB, INVALID_RGB):
+        np.testing.assert_array_equal(np.all(faint == color, axis=2), np.all(strong == color, axis=2))
 
 
 def test_surface_preserves_all_measured_centers_and_invalid_taxel_footprints():

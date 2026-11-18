@@ -10,7 +10,7 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from griptile_core.contact_image import (
-    CONTACT_COLOR_STOPS, DEFAULT_CONTACT_SPAN, INVALID_RGB, UNLOADED_RGB, contact_surface_rgb,
+    CONTACT_COLOR_STOPS, DEFAULT_CONTACT_SPAN, INVALID_RGB, UNLOADED_RGB, amplitude_rgb, contact_surface_rgb,
 )
 
 from griptile_core.grid import ROWS, COLS
@@ -29,6 +29,8 @@ DELTA = _palette(("#2d5eaf", "#8ab9e6", "#f9f8ee", "#f2a272", "#a0373c"))
 
 
 CONTACT_MODE, SURFACE_MODE, RAW_MODE, DELTA_MODE = range(4)
+# Earlier published RGB8 images reserve white for a valid unloaded taxel.
+_LEGACY_UNLOADED_RGB = (255, 255, 255)
 
 
 def _swatch(rgb, label):
@@ -51,7 +53,7 @@ def _contact_legend():
     bar.setMinimumWidth(100)
     bar.setMaximumWidth(240)
     bar.setFixedHeight(12)
-    bar.setToolTip("蓝：弱　青绿：中等　黄橙：较强　红：达到满量程")
+    bar.setToolTip("浅蓝灰：无载　浅蓝至青：轻触　绿、黄、橙、红：响应逐渐增强")
     bar.setAccessibleName("接触强度色带")
     bar.setAccessibleDescription(bar.toolTip())
     layout.addWidget(bar, 1)
@@ -163,6 +165,9 @@ class ViewerWindow(QtWidgets.QMainWindow):
         layout.addWidget(self.map, stretch=4)
         self.scale = _contact_legend()
         layout.addWidget(self.scale)
+        self.source_scale = QtWidgets.QLabel()
+        self.source_scale.setAlignment(QtCore.Qt.AlignCenter)
+        layout.addWidget(self.source_scale)
         self.cell_label = QtWidgets.QLabel("点击单元查看曲线")
         details_layout.addWidget(self.cell_label)
         self.curve = pg.PlotWidget(background="#171b21")
@@ -319,7 +324,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
         surface = mode == SURFACE_MODE
         self.span.setVisible(delta)
         self.span_label.setVisible(delta)
-        self.scale.setVisible(contact)
+        source_colors = False
         mode_changed = self._format != mode
         if mode_changed:
             self.image.setLookupTable({RAW_MODE: RAW, DELTA_MODE: DELTA}.get(mode))
@@ -328,15 +333,28 @@ class ViewerWindow(QtWidgets.QMainWindow):
         if contact:
             if surface:
                 amplitude = model.contact_response(now)
+            elif model.replay:
+                amplitude = None  # Preserve the exact recorded RGB8 in the native view.
+            else:
+                amplitude = model.contact_response(now, allow_rgb_fallback=True)
+            if amplitude is not None:
                 status = model.current_reference
                 span = status.span_adc if model.reference is not None else DEFAULT_CONTACT_SPAN
-                frame = self._surface(amplitude, span)
+                frame = self._surface(amplitude, span) if surface else amplitude_rgb(amplitude, span)
                 usable = np.isfinite(amplitude)
                 active = amplitude > 0
             else:
                 frame = model.contact_pixels(now)
                 usable = np.any(frame != INVALID_RGB, axis=2)
-                active = usable & np.any(frame != UNLOADED_RGB, axis=2)
+                unloaded = np.all(frame == UNLOADED_RGB, axis=2)
+                legacy_unloaded = np.all(frame == _LEGACY_UNLOADED_RGB, axis=2)
+                active = usable & ~(unloaded | legacy_unloaded)
+                # RGB8 carries no palette metadata. The new unloaded color
+                # identifies current frames; older full-contact images can be ambiguous.
+                source_colors = bool(usable.any() and not unloaded.any())
+                if source_colors:
+                    self.source_scale.setText("源图配色　白色无载　灰色缺测" if legacy_unloaded.any()
+                                              else "源图配色　灰色缺测")
             self.image.setImage(frame, autoLevels=False, levels=None)
             summary = (f"接触 {active.sum()} 点　有效像素 {usable.sum()}/400" if usable.any()
                        else "接触点待测　有效像素 0/400")
@@ -346,6 +364,8 @@ class ViewerWindow(QtWidgets.QMainWindow):
             levels = (-self.span.value(), self.span.value()) if delta else (0, 65535)
             self.image.setImage(model.values(now, delta), autoLevels=False, levels=levels)
             summary = f"色域 {levels[0]} 至 {levels[1]} {'ΔADC' if delta else 'ADC'}　灰色为无效单元"
+        self.scale.setVisible(contact and not source_colors)
+        self.source_scale.setVisible(source_colors)
         if mode_changed:
             # Both image resolutions occupy the same native sensor coordinates.
             self.image.setRect(QtCore.QRectF(0, 0, COLS, ROWS))

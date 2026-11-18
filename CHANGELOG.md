@@ -11,3 +11,4 @@
 - Add a guided live known-load calibration, independent loading and unloading checks, release residuals, and same-load repeats with a local JSON report.
 - Focus the live viewer on the contact surface and the load check on the loading/unloading comparison and release residual. Put diagnostics and exports in expandable details.
 - Configure the live driver’s serial port and baud rate from the viewer, with passive discovery, connection status and explicit disconnect.
+- Use a light blue-gray idle surface and a gradual low-response color ramp in the contact images, viewer and exports.
