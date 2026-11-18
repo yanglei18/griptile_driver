@@ -379,6 +379,10 @@ def test_known_load_window_uses_the_drivers_unclipped_samples(qt_app, open_windo
                 np.testing.assert_array_equal(window.image.image[center::SURFACE_SCALE, center::SURFACE_SCALE],
                                               amplitude_rgb(field, 3000))
                 assert window.peak.text() == f"峰值 {peak}"
+                # The driver-calibrated threshold for these two taxels is 3 ADC.
+                # A 6-count contact remains colored but has no strong outline seed.
+                outlined = window.contour_image.isVisible() and bool(np.any(window.contour_image.image))
+                assert outlined == (delta >= 30)
             window.load_button.click()
             dialog = window.load_dialog
             dialog.check_force.setValue(2)

@@ -7,7 +7,7 @@ import pytest
 
 from griptile_core.assembler import Assembler
 from griptile_core.contact_image import (
-    CONTACT_COLOR_STOPS, INVALID_RGB, STRONG_RGB, UNLOADED_RGB, WEAK_RGB, amplitude_rgb,
+    CONTACT_COLOR_STOPS, INVALID_RGB, STRONG_RGB, UNLOADED_RGB, WEAK_RGB, amplitude_rgb, contact_surface_rgb,
 )
 from griptile_core.grid import LAYOUT_ID
 from griptile_core.protocol import Block, PROTOCOL_ID
@@ -233,6 +233,73 @@ def response(state, amplitude, *, bigendian=False):
     data = np.asarray(amplitude, dtype=">f4" if bigendian else "<f4").tobytes()
     return SimpleNamespace(header=state.header, height=20, width=20, encoding="32FC1", step=80,
                            is_bigendian=bigendian, data=data)
+
+
+def test_contour_is_a_display_layer_bound_to_the_measured_reference(open_window, tmp_path):
+    from griptile_viewer.window import CONTACT_MODE, RAW_MODE, SURFACE_MODE, QtGui
+
+    model = ArrayView(SENSOR)
+    assembler = Assembler(sensor_id=SENSOR)
+    first = snapshot(assembler, 1, START)
+    status = profile_status()
+    status.header, status.direction = first.header, "both"
+    model.accept(first, 0)
+    model.accept_reference(status)
+    now = 20_000_000
+    pressed = snapshot(assembler, 2, START + now)
+    field = np.zeros((20, 20), dtype=np.float32)
+    field[4:6, 6:9] = 16
+    field[4, 6] = 180
+    model.accept(pressed, now)
+    model.accept_response(response(pressed, field))
+    window = open_window(model, clock_ns=lambda: now)
+
+    def pixels(img):
+        rgb = img.convertToFormat(QtGui.QImage.Format_RGB888)
+        pointer = rgb.constBits()
+        pointer.setsize(rgb.byteCount())
+        rows = np.frombuffer(pointer, np.uint8).reshape(rgb.height(), rgb.bytesPerLine())
+        return rows[:, :3 * rgb.width()].reshape(rgb.height(), rgb.width(), 3).copy()
+
+    def drawn():
+        return np.all(pixels(window.map.viewport().grab().toImage()) == (58, 83, 97), axis=2).any()
+
+    assert window.contour_checkbox.text() == "接触轮廓" and window.contour_checkbox.isChecked()
+    assert not window.contour_checkbox.isVisible() and drawn()
+    window.details_button.click()
+    assert window.contour_checkbox.isVisible()
+    window.contour_checkbox.click()
+    assert not drawn()
+    window.contour_checkbox.click()
+    assert drawn()
+    path = tmp_path / "surface.png"
+    window.save_png(path)
+    np.testing.assert_array_equal(pixels(QtGui.QImage(str(path))), contact_surface_rgb(field, status.span_adc))
+    np.testing.assert_array_equal(model.contact_response(now), field)
+    for mode in (CONTACT_MODE, RAW_MODE):
+        window.mode.setCurrentIndex(mode)
+        window.refresh()
+        assert not drawn()
+    window.mode.setCurrentIndex(SURFACE_MODE)
+    window.refresh()
+    assert drawn()
+
+    # A direct ready-to-ready reference replacement may reuse an image header.
+    # Its old measurements cannot supply a boundary using the new noise profile.
+    replacement = profile_status()
+    replacement.header, replacement.direction = pressed.header, "both"
+    model.accept_reference(replacement)
+    window.refresh()
+    assert not drawn()
+    now += 20_000_000
+    fresh = snapshot(assembler, 3, START + now)
+    model.accept(fresh, now)
+    model.accept_response(response(fresh, field))
+    window.refresh()
+    assert drawn()
+    now += 100_000_001
+    window.refresh()
+    assert not drawn()
 
 
 @pytest.mark.parametrize("replay", [False, True])

@@ -10,7 +10,8 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from griptile_core.contact_image import (
-    CONTACT_COLOR_STOPS, DEFAULT_CONTACT_SPAN, INVALID_RGB, UNLOADED_RGB, amplitude_rgb, contact_surface_rgb,
+    CONTACT_COLOR_STOPS, CONTACT_OUTLINE_RGB, DEFAULT_CONTACT_SPAN, INVALID_RGB, SURFACE_SCALE,
+    UNLOADED_RGB, amplitude_rgb, contact_surface_rgb, surface_contact_outline,
 )
 
 from griptile_core.grid import ROWS, COLS
@@ -112,7 +113,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.setWindowTitle(f"GripTile · 触觉显示 · {model.sensor_id}")
         self.setStyleSheet("""
             QMainWindow, QStatusBar { background: #151c22; }
-            QLabel, QStatusBar { color: #e0e9ed; font-size: 14px; }
+            QLabel, QCheckBox, QStatusBar { color: #e0e9ed; font-size: 14px; }
             QFrame#contactMonitor { background: #273038; border-radius: 13px; }
             QFrame#contactMonitor QLabel { color: #d6dee4; font-size: 12px; }
             QFrame#contactMonitor QLabel#brand { color: #f0f5f7; font-weight: 600; font-size: 18px; }
@@ -178,6 +179,10 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.mode.addItems(["接触图 RGB", "连续接触面（估算）", "原始 ADC", "相对无载参考 ΔADC"])
         self.mode.setCurrentIndex(SURFACE_MODE)
         controls.addWidget(self.mode)
+        self.contour_checkbox = QtWidgets.QCheckBox("接触轮廓")
+        self.contour_checkbox.setToolTip("按各触点的无载波动描出连续接触区的边缘。仅用于屏幕显示。")
+        self.contour_checkbox.setChecked(True)
+        controls.addWidget(self.contour_checkbox)
         self.span_label = QtWidgets.QLabel("差值色限 ±")
         controls.addWidget(self.span_label)
         self.span = QtWidgets.QSpinBox()
@@ -203,6 +208,13 @@ class ViewerWindow(QtWidgets.QMainWindow):
             self.map.getAxis(axis).setTicks([ticks])
         self.image = pg.ImageItem(axisOrder="row-major", autoDownsample=False)
         self.map.addItem(self.image)
+        # Keep the visual annotation separate from numeric colors, inspection and PNG export.
+        self.contour_image = pg.ImageItem(axisOrder="row-major", autoDownsample=False)
+        self.contour_image.setLookupTable(np.array([(0, 0, 0, 0), (*CONTACT_OUTLINE_RGB, 255)], dtype=np.uint8))
+        self.contour_image.setTransform(QtGui.QTransform.fromScale(1 / SURFACE_SCALE, 1 / SURFACE_SCALE))
+        self.contour_image.setAcceptedMouseButtons(QtCore.Qt.NoButton)
+        self.contour_image.hide()
+        self.map.addItem(self.contour_image, ignoreBounds=True)
         self.marker = self.map.plot([], [], pen=None, symbol="s", symbolPen=pg.mkPen("w", width=2),
                                     symbolBrush=None, symbolSize=13)
         self.map.scene().sigMouseClicked.connect(self.pick_cell)
@@ -243,7 +255,8 @@ class ViewerWindow(QtWidgets.QMainWindow):
         details_layout.addLayout(footer)
         layout.addWidget(self.details, stretch=2)
         self._format = None
-        self._surface_input = self._surface_span = self._surface_pixels = None
+        self._surface_input = self._surface_span = self._surface_pixels = self._surface_thresholds = None
+        self.contour_checkbox.toggled.connect(self.refresh)
         self.details_button.toggled.connect(self._show_details)
         self._show_details(False)
 
@@ -354,10 +367,21 @@ class ViewerWindow(QtWidgets.QMainWindow):
             label = f"{value:g} {'ΔADC' if delta else 'ADC'}" if np.isfinite(value) else "无有效值"
             self.statusBar().showMessage(f"行 {cell[0]}  列 {cell[1]}    {label}", 1500)
 
-    def _surface(self, amplitude, span):
-        if self._surface_span != span or not np.array_equal(self._surface_input, amplitude, equal_nan=True):
+    def _surface(self, amplitude, span, thresholds):
+        changed = not np.array_equal(self._surface_input, amplitude, equal_nan=True)
+        if changed or self._surface_span != span:
             self._surface_pixels = contact_surface_rgb(amplitude, span)
-            self._surface_input, self._surface_span = amplitude, span
+        if thresholds is None:
+            if self._surface_thresholds is not None:
+                self.contour_image.clear()
+        elif changed or not np.array_equal(self._surface_thresholds, thresholds, equal_nan=True):
+            edge = surface_contact_outline(amplitude, thresholds)
+            if edge.any():
+                self.contour_image.setImage(edge.astype(np.uint8), autoLevels=False, levels=(0, 1))
+            else:
+                self.contour_image.clear()
+        self.contour_image.setVisible(thresholds is not None and self.contour_image.image is not None)
+        self._surface_input, self._surface_span, self._surface_thresholds = amplitude, span, thresholds
         return self._surface_pixels
 
     def refresh(self):
@@ -375,6 +399,9 @@ class ViewerWindow(QtWidgets.QMainWindow):
         delta = mode == DELTA_MODE
         contact = mode in (CONTACT_MODE, SURFACE_MODE)
         surface = mode == SURFACE_MODE
+        self.contour_checkbox.setVisible(surface)
+        if not surface:
+            self.contour_image.hide()
         self.span.setVisible(delta)
         self.span_label.setVisible(delta)
         source_colors = False
@@ -384,7 +411,10 @@ class ViewerWindow(QtWidgets.QMainWindow):
             self.png_button.setText("导出估算图" if surface else "导出图像")
             self._format = mode
         if contact:
-            if surface:
+            thresholds = None
+            if surface and self.contour_checkbox.isChecked():
+                amplitude, thresholds = model.contact_surface_inputs(now)
+            elif surface:
                 amplitude = model.contact_response(now)
             elif model.replay:
                 amplitude = None  # Preserve the exact recorded RGB8 in the native view.
@@ -393,7 +423,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
             if amplitude is not None:
                 status = model.current_reference
                 span = status.span_adc if model.reference is not None else DEFAULT_CONTACT_SPAN
-                frame = self._surface(amplitude, span) if surface else amplitude_rgb(amplitude, span)
+                frame = self._surface(amplitude, span, thresholds) if surface else amplitude_rgb(amplitude, span)
                 usable = np.isfinite(amplitude)
                 active = amplitude > 0
                 self.peak.setText(_peak_label(amplitude, usable, span))

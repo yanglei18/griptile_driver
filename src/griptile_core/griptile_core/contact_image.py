@@ -8,6 +8,7 @@ from .grid import COLS, ROWS
 DEFAULT_CONTACT_SPAN = 3000.0  # Noise-gated ADC counts at full red.
 INVALID_RGB = (128, 128, 128)
 UNLOADED_RGB = (224, 233, 239)
+CONTACT_OUTLINE_RGB = (58, 83, 97)
 # The first active color is one red-channel code below unloaded. Even a
 # sub-quantization response retains its contact flag in an RGB-only image.
 CONTACT_COLOR_STOPS = (
@@ -50,17 +51,20 @@ def contact_amplitude(response) -> np.ndarray:
     return np.where(valid, values, np.nan)
 
 
-def _check_response(amplitude, span):
-    values = np.asarray(amplitude, dtype=float)
+def _check_span(span):
     if not np.isfinite(span) or span <= 0:
         raise ValueError("span must be finite and positive")
+
+
+def _check_response(amplitude):
+    values = np.asarray(amplitude, dtype=float)
     if np.any(np.isinf(values)) or np.any(values < 0):
         raise ValueError("amplitude must contain nonnegative counts or NaN")
     return values
 
 
-def _check_field(amplitude, span):
-    values = _check_response(amplitude, span)
+def _check_field(amplitude):
+    values = _check_response(amplitude)
     if values.shape != (ROWS, COLS):
         raise ValueError("amplitude must have the native 20x20 grid shape")
     return values
@@ -68,7 +72,8 @@ def _check_field(amplitude, span):
 
 def contact_intensity_rgb(response_adc, span):
     """Return the native taxel color for a numeric readout or report."""
-    samples = _check_response([response_adc], span)
+    _check_span(span)
+    samples = _check_response([response_adc])
     if samples.shape != (1,):
         raise ValueError("expected one taxel response")
     rgb = _color_response(samples, np.isfinite(samples), samples > 0, span)
@@ -77,7 +82,8 @@ def contact_intensity_rgb(response_adc, span):
 
 def amplitude_rgb(amplitude, span) -> np.ndarray:
     """Apply the fixed contact color scale to a native ADC response field."""
-    values = _check_field(amplitude, span)
+    _check_span(span)
+    values = _check_field(amplitude)
     return _color_response(values, np.isfinite(values), values > 0, span)
 
 
@@ -111,7 +117,8 @@ def contact_surface_rgb(amplitude, span) -> np.ndarray:
     strength. A neighborhood containing unknown data uses its nearest taxel
     instead of estimating a gradient across the missing measurements.
     """
-    values = _check_field(amplitude, span)
+    _check_span(span)
+    values = _check_field(amplitude)
     valid = np.isfinite(values)
     active = values > 0
     # Handle uniform unloaded and unknown frames without interpolating an empty surface.
@@ -132,3 +139,52 @@ def contact_surface_rgb(amplitude, span) -> np.ndarray:
         inside[rows, cols] = nearest > 0
         visible[rows, cols] = np.isfinite(nearest)
     return _color_response(smooth, visible, inside, span)
+
+
+def _connected_contact_mask(amplitude, thresholds, valid):
+    """Retain weak taxels reachable from a strong taxel through shared sides."""
+    weak = valid & (amplitude >= 2 * thresholds)
+    region = valid & (amplitude >= 8 * thresholds)
+    while region.any():
+        expanded = region.copy()
+        expanded[1:] |= region[:-1]
+        expanded[:-1] |= region[1:]
+        expanded[:, 1:] |= region[:, :-1]
+        expanded[:, :-1] |= region[:, 1:]
+        expanded &= weak
+        if np.array_equal(expanded, region):
+            break
+        region = expanded
+    return region
+
+
+def _all_four_neighbors(mask):
+    """True where all four side neighbors of an interior pixel are true."""
+    return mask[:-2, 1:-1] & mask[2:, 1:-1] & mask[1:-1, :-2] & mask[1:-1, 2:]
+
+
+def surface_contact_outline(amplitude, contour_thresholds) -> np.ndarray:
+    """Return a one-pixel boundary on the same grid as the continuous RGB view.
+
+    Both inputs are native 20×20 arrays. The reference supplies the activation
+    threshold in ADC counts for each taxel; NaN or a nonpositive threshold
+    marks an unsupported reference. The caller must pair it with the measured
+    response from the same acquisition. No previous frames or color span enter.
+    """
+    values = _check_field(amplitude)
+    thresholds = np.asarray(contour_thresholds, dtype=float)
+    if thresholds.shape != values.shape:
+        raise ValueError("contour thresholds must have the native 20x20 grid shape")
+    valid = np.isfinite(values) & np.isfinite(thresholds) & (thresholds > 0)
+    region = _connected_contact_mask(values, thresholds, valid)
+    outline = np.zeros((ROWS * SURFACE_SCALE, COLS * SURFACE_SCALE), dtype=bool)
+    if region.any() and not region.all():
+        inside = _bilinear(region) >= 0.5
+        boundary = inside[1:-1, 1:-1] & ~_all_four_neighbors(inside)
+        if not valid.all():
+            # A missing corner makes its interpolation neighborhood unknown.
+            # Suppress the adjoining edge as well, so a dropout cannot outline a hole.
+            supported = _bilinear(~valid) == 0
+            boundary &= supported[1:-1, 1:-1] & _all_four_neighbors(supported)
+        outline[1:-1, 1:-1] = boundary
+    return outline

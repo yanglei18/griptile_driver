@@ -13,3 +13,4 @@
 - Configure the live driver’s serial port and baud rate from the viewer, with passive discovery, connection status and explicit disconnect.
 - Use a light blue-gray idle surface and a gradual low-response color ramp in the contact images, viewer and exports.
 - Present the live contact surface in a square display with a shared intensity scale, measured peak readout and direct access to serial settings.
+- Outline measured contact boundaries in the continuous viewer using the sensor’s per-cell unloaded thresholds, with a display toggle in Details.

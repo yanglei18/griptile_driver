@@ -147,6 +147,14 @@ class ArrayView:
                     return frame, fresh & np.asarray(reference.valid_mask).reshape(SHAPE), state
         return None, None, None
 
+    @staticmethod
+    def _rows_after_reference(state, context):
+        # The driver can publish the old and new response with the same header
+        # at a ready-to-ready reference switch. Only later rows are unambiguous.
+        if state.header.frame_id != context.frame_id:
+            return np.zeros(ROWS, dtype=bool)
+        return np.asarray(state.row_realtime_ns) > context.reference_stamp_ns
+
     def load_observation(self, clock_ns):
         """Observe the same native response as the colors, before display saturation."""
         context = self.load_context
@@ -155,10 +163,7 @@ class ArrayView:
         frame, valid, state = self._paired_sample(self._responses, clock_ns)
         if frame is None or not valid.all() or not np.isfinite(frame).all():
             return None
-        # New and previous references can publish different images with exactly
-        # the same state header at the switch. Start after all rows cross it.
-        if (state.header.frame_id != context.frame_id
-                or min(state.row_realtime_ns) <= context.reference_stamp_ns):
+        if not self._rows_after_reference(state, context).all():
             return None
         baseline = np.asarray(self.reference.baseline_adc).reshape(SHAPE)
         signed = frame * np.sign(np.asarray(state.adc).reshape(SHAPE) - baseline)
@@ -174,15 +179,31 @@ class ArrayView:
             image[valid] = frame[valid]
         return image
 
-    def contact_response(self, clock_ns, *, allow_rgb_fallback=False):
-        """Prefer native measurements for the rest of an acquisition once observed."""
-        frame, valid, _ = self._paired_sample(self._responses, clock_ns)
+    def _response_with_state(self, clock_ns, *, allow_rgb_fallback=False):
+        frame, valid, state = self._paired_sample(self._responses, clock_ns)
         if frame is not None and (valid & np.isfinite(frame)).any():
             self._has_measured_response = True
-            return np.where(valid, frame, np.nan)
+            return np.where(valid, frame, np.nan), state
         if allow_rgb_fallback and not self._has_measured_response:
-            return None
-        return np.full(SHAPE, np.nan, dtype=np.float32)
+            return None, None
+        return np.full(SHAPE, np.nan, dtype=np.float32), None
+
+    def contact_response(self, clock_ns, *, allow_rgb_fallback=False):
+        """Prefer native measurements for the rest of an acquisition once observed."""
+        amplitude, _ = self._response_with_state(clock_ns, allow_rgb_fallback=allow_rgb_fallback)
+        return amplitude
+
+    def contact_surface_inputs(self, clock_ns):
+        """Pair measured amplitudes with the active noise thresholds for contouring."""
+        amplitude, state = self._response_with_state(clock_ns)
+        context = self.load_context
+        if state is None or context is None:
+            return amplitude, None
+        rows = self._rows_after_reference(state, context)
+        if not rows.any():
+            return amplitude, None
+        thresholds = np.asarray(self.reference.activation_threshold_adc).reshape(SHAPE)
+        return amplitude, np.where(rows[:, None] & np.isfinite(amplitude), thresholds, np.nan)
 
     def accept(self, message, clock_ns):
         if message.sensor_id != self.sensor_id:

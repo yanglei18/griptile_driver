@@ -6,6 +6,7 @@ import pytest
 from griptile_core.contact_image import (
     DEFAULT_CONTACT_SPAN, INVALID_RGB, STRONG_RGB, SURFACE_SCALE, UNLOADED_RGB, WEAK_RGB,
     amplitude_rgb, contact_amplitude, contact_intensity_rgb, contact_rgb, contact_surface_rgb,
+    surface_contact_outline,
 )
 from griptile_core.display_response import ReferenceProfile, ResponseSettings, TactileResponseProcessor
 from griptile_core.grid import CELL_COUNT, COLS, ROWS
@@ -203,3 +204,65 @@ def test_contact_amplitude_preserves_supra_range_counts_and_missing_measurements
     np.testing.assert_equal(field[0, :3], [0., 5000., np.nan])
     np.testing.assert_equal(amplitude_rgb(field, DEFAULT_CONTACT_SPAN), contact_rgb(response))
     assert not np.shares_memory(values, field)
+
+
+def test_outline_traces_outer_and_inner_edges_without_recoloring_taxel_centers_or_closing_a_gap():
+    thresholds = np.arange(1, CELL_COUNT + 1, dtype=float).reshape(ROWS, COLS)
+    ring = np.zeros((ROWS, COLS), dtype=bool)
+    ring[4:11, 5:12] = True
+    ring[5:10, 6:11] = False
+    response = np.where(ring, 2 * thresholds, 0)
+    assert not surface_contact_outline(response, thresholds).any()
+    response[7, 5] = 8 * thresholds[7, 5]
+    line = surface_contact_outline(response, thresholds)
+    assert line.shape == (ROWS * SURFACE_SCALE, COLS * SURFACE_SCALE) and line.dtype == bool
+    # Both the outside and inside of the top edge are visible.
+    center = SURFACE_SCALE // 2
+    column = 8 * SURFACE_SCALE + center
+    assert line[4 * SURFACE_SCALE, column] and line[5 * SURFACE_SCALE - 1, column]
+    assert not line[center::SURFACE_SCALE, center::SURFACE_SCALE].any()
+    # Absolute counts and the RGB color span do not define this membership.
+    stronger = np.where(ring, thresholds * 16, 0)
+    np.testing.assert_array_equal(line, surface_contact_outline(stronger, thresholds))
+    response[4, 8] = 0
+    opened = surface_contact_outline(response, thresholds)
+    assert opened.any() and not opened[4 * SURFACE_SCALE:5 * SURFACE_SCALE, column].any()
+    assert not surface_contact_outline(np.zeros_like(response), thresholds).any()
+
+
+def test_outline_grows_through_shared_sides_only_and_retains_separate_strong_contacts():
+    thresholds = np.full((ROWS, COLS), 20.)
+    response = np.zeros_like(thresholds)
+    response[3, 3] = 160
+    response[5, 5] = 160
+    separate = surface_contact_outline(response, thresholds)
+    assert separate[3 * SURFACE_SCALE:4 * SURFACE_SCALE, 3 * SURFACE_SCALE:4 * SURFACE_SCALE].any()
+    assert separate[5 * SURFACE_SCALE:6 * SURFACE_SCALE, 5 * SURFACE_SCALE:6 * SURFACE_SCALE].any()
+    response[4, 4] = 40
+    np.testing.assert_array_equal(surface_contact_outline(response, thresholds), separate)
+    response[4, 3] = 40
+    assert not np.array_equal(surface_contact_outline(response, thresholds), separate)
+    thresholds[4, 3] = 21
+    np.testing.assert_array_equal(surface_contact_outline(response, thresholds), separate)
+
+
+@pytest.mark.parametrize("missing", ["response", "reference"])
+def test_outline_does_not_trace_sensor_edges_or_infer_contact_against_unknown_rows(missing):
+    thresholds = np.full((ROWS, COLS), 10.)
+    response = np.full_like(thresholds, 100.)
+    if missing == "response":
+        response[10, :] = np.nan
+    else:
+        thresholds[10, :] = 0
+    assert not surface_contact_outline(response, thresholds).any()
+    # With measured unloaded samples the transition has real support on both sides.
+    thresholds[10, :] = 10
+    response[10, :] = 0
+    line = surface_contact_outline(response, thresholds)
+    assert line[10 * SURFACE_SCALE - 1, 150] and line[11 * SURFACE_SCALE, 150]
+    assert not line[[0, -1], :].any() and not line[:, [0, -1]].any()
+
+
+def test_outline_requires_the_reference_to_address_the_same_grid():
+    with pytest.raises(ValueError, match="20x20"):
+        surface_contact_outline(np.zeros((ROWS, COLS)), np.ones(CELL_COUNT))
