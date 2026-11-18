@@ -70,7 +70,8 @@ class ViewerWindow(QtWidgets.QMainWindow):
         layout.addWidget(self.status)
         controls = QtWidgets.QHBoxLayout()
         self.mode = QtWidgets.QComboBox()
-        self.mode.addItems(["接触图 RGB", "连续接触面（估算）", "原始 ADC", "相对无载参考 ΔADC"])
+        self.mode.addItems(["接触图 RGB", "柔和接触图（估算）", "原始 ADC", "相对无载参考 ΔADC"])
+        self.mode.setCurrentIndex(SURFACE_MODE)
         controls.addWidget(self.mode)
         self.span_label = QtWidgets.QLabel("差值色限 ±")
         controls.addWidget(self.span_label)
@@ -94,7 +95,6 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.map.getViewBox().setMenuEnabled(False)
         self.map.setMouseEnabled(False, False)
         self.map.invertY()
-        self.map.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, False)
         self.map.setXRange(0, COLS, padding=0)
         self.map.setYRange(0, ROWS, padding=0)
         ticks = [(n + .5, str(n)) for n in (0, 4, 9, 14, 19)]
@@ -227,6 +227,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.scale.setVisible(contact)
         mode_changed = self._format != mode
         if mode_changed:
+            self.map.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, surface)
             self.image.setLookupTable({RAW_MODE: RAW, DELTA_MODE: DELTA}.get(mode))
             self.png_button.setText("导出估算图" if surface else "导出图像")
             self._format = mode

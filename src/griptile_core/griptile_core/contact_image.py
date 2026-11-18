@@ -60,47 +60,84 @@ def contact_rgb(response) -> np.ndarray:
 
 
 def _sample_axis(count):
-    offset = np.arange(count * SURFACE_SCALE) - SURFACE_SCALE // 2
-    lower, remainder = np.divmod(np.clip(offset, 0, (count - 1) * SURFACE_SCALE), SURFACE_SCALE)
-    return lower, np.minimum(lower + 1, count - 1), remainder / SURFACE_SCALE
+    at = np.clip((np.arange(count * SURFACE_SCALE) - SURFACE_SCALE // 2) / SURFACE_SCALE,
+                 0, count - 1)
+    left = at.astype(int)
+    t = at - left
+    indexes = np.clip(left[:, None] + np.arange(-1, 3), 0, count - 1)
+    # Cubic B-spline weights for coverage and interpolating Catmull-Rom weights
+    # for measured intensity. Edges repeat the outermost taxel.
+    spline = np.array([(1-t)**3, 4-6*t*t+3*t**3, 1+3*t+3*t*t-3*t**3, t**3]) / 6
+    cardinal = np.array([-t*(1-t)**2, 2-5*t*t+3*t**3, t+4*t*t-3*t**3, -t*t*(1-t)]) / 2
+    return indexes.T, spline, cardinal, t
 
 
-_LEFT, _RIGHT, _DX = _sample_axis(COLS)
-_TOP, _BOTTOM, _DY = _sample_axis(ROWS)
+_X, _X_SPLINE, _X_CARDINAL, _DX = _sample_axis(COLS)
+_Y, _Y_SPLINE, _Y_CARDINAL, _DY = _sample_axis(ROWS)
 
 
-def _bilinear(field):
-    """Interpolate between taxel centers, extending edge samples to the array boundary."""
-    horizontal = field[:, _LEFT] * (1.0 - _DX) + field[:, _RIGHT] * _DX
-    return horizontal[_TOP] * (1.0 - _DY[:, None]) + horizontal[_BOTTOM] * _DY[:, None]
+def _resample(field, x_weights, y_weights):
+    horizontal = sum(field[:, index] * weight for index, weight in zip(_X, x_weights))
+    return sum(horizontal[index] * weight[:, None] for index, weight in zip(_Y, y_weights))
+
+
+def _smoothstep(t):
+    t = np.clip(t, 0, 1)
+    return t*t*(3-2*t)
+
+
+def _contact_opacity(active):
+    # Compensate the coverage attenuation of isolated taxels at their centers.
+    # A cubic B-spline sampled at an integer has weights [1, 4, 1] / 6.
+    padded = np.pad(active.astype(float), 1, mode="edge")
+    across = (padded[:, :-2] + 4*padded[:, 1:-1] + padded[:, 2:]) / 6
+    center = (across[:-2] + 4*across[1:-1] + across[2:]) / 6
+    coefficients = np.where(active, 1.0 / np.maximum(center, 4/9), 0.0)
+    coverage = _resample(coefficients, _X_SPLINE, _Y_SPLINE)
+    opacity = _smoothstep((coverage - .30) / .64)
+
+    # Keep measured gaps open. At a checkerboard saddle, connect the two
+    # unloaded corners. The two diagonally touching positives stay distinct.
+    tl, tr = (active[_Y[1, :, None], x] for x in _X[1:3])
+    bl, br = (active[_Y[2, :, None], x] for x in _X[1:3])
+    dx, dy = _DX, _DY[:, None]
+    support = ((1-dy) * ((1-dx)*tl + dx*tr) + dy * ((1-dx)*bl + dx*br))
+    saddle = (tl == br) & (bl == tr) & (tl != tr)
+    support = np.where(saddle, np.where(tl, abs(1-dx-dy), abs(dx-dy)), support)
+    return np.minimum(opacity, _smoothstep(support / .65))
 
 
 def contact_surface_rgb(amplitude, span) -> np.ndarray:
-    """Render a continuous view from 20x20 noise-gated ADC counts.
+    """Render a feathered contact impression of the native 20x20 ADC response.
 
-    NaN marks an unknown sample, zero an unloaded sample. The half-coverage
-    contour of the active samples defines the footprint independently of their
-    strength. A neighborhood containing unknown data uses its nearest taxel
-    instead of estimating a gradient across the missing measurements.
+    Coverage and intensity are reconstructed separately before compositing on
+    white. NaN taxels stay gray. Where a cubic footprint crosses missing data,
+    display the nearest measurement instead of estimating across that gap.
     """
     values = _check_field(amplitude, span)
     valid = np.isfinite(values)
     active = values > 0
-    # Handle uniform unloaded and unknown frames without interpolating an empty surface.
     if not active.any():
         native = np.where(valid[..., None], UNLOADED_RGB, INVALID_RGB).astype(np.uint8)
         return native.repeat(SURFACE_SCALE, axis=0).repeat(SURFACE_SCALE, axis=1)
 
-    smooth = _bilinear(np.where(valid, values, 0))
-    inside = _bilinear(active) >= 0.5
-    visible = np.ones(inside.shape, dtype=bool)
+    source = np.where(valid, values, 0.0)
+    smooth = _resample(source, _X_CARDINAL, _Y_CARDINAL)
+    # Bound cubic overshoot by the four bracketing measured amplitudes.
+    corners = [source[y[:, None], x] for y in _Y[1:3] for x in _X[1:3]]
+    smooth = np.clip(smooth, np.minimum.reduce(corners), np.maximum.reduce(corners))
+    opacity = _contact_opacity(active)
+    strength = np.minimum(smooth/span, 1.0)
+    pixels = np.empty((*strength.shape, 3), dtype=np.uint8)
+    for channel, (weak, strong) in enumerate(zip(WEAK_RGB, STRONG_RGB)):
+        ink = weak + (strong-weak)*strength
+        # A translucent red edge warms towards white; the native palette is
+        # recovered exactly at full opacity.
+        amount = opacity**2 if channel == 0 else opacity
+        pixels[..., channel] = np.rint(255 + amount*(ink-255))
     if not valid.all():
-        # Fully unknown taxels stay gray across their whole footprint. On the
-        # valid side of a missing edge, keep the known nearest sample.
-        missing_neighbor = _bilinear(~valid) > 0
-        rows, cols = np.nonzero(missing_neighbor)
-        nearest = values[rows // SURFACE_SCALE, cols // SURFACE_SCALE]
-        smooth[rows, cols] = nearest
-        inside[rows, cols] = nearest > 0
-        visible[rows, cols] = np.isfinite(nearest)
-    return _color_response(smooth, visible, inside, span)
+        unsupported = _resample(~valid, _X_SPLINE, _Y_SPLINE) > 0
+        native = amplitude_rgb(values, span)
+        y, x = np.nonzero(unsupported)
+        pixels[y, x] = native[y // SURFACE_SCALE, x // SURFACE_SCALE]
+    return pixels

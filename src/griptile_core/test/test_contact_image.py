@@ -89,7 +89,7 @@ def test_fixed_colors_are_independent_of_other_taxels_and_clip_only_at_full_scal
     np.testing.assert_array_equal(image(detector, values, time=2), first)
 
 
-def test_surface_preserves_all_measured_centers_and_invalid_taxel_footprints():
+def test_surface_keeps_measured_touch_states_and_invalid_taxel_footprints():
     rng = np.random.default_rng(17)
     amplitude = rng.integers(0, 6000, size=(ROWS, COLS)).astype(float)
     amplitude[5::3, 8::4] = np.nan
@@ -99,26 +99,40 @@ def test_surface_preserves_all_measured_centers_and_invalid_taxel_footprints():
     surface = contact_surface_rgb(amplitude, DEFAULT_CONTACT_SPAN)
     assert surface.shape == (300, 300, 3) and surface.dtype == np.uint8 and surface.flags.c_contiguous
     center = SURFACE_SCALE // 2
-    np.testing.assert_array_equal(surface[center::SURFACE_SCALE, center::SURFACE_SCALE], native)
+    centers = surface[center::SURFACE_SCALE, center::SURFACE_SCALE]
+    np.testing.assert_array_equal(centers[amplitude == 0], native[amplitude == 0])
+    # Contact opacity can soften a boundary taxel, including its center.
+    loaded = centers[amplitude > 0]
+    assert np.all(loaded[:, 0] > loaded[:, 1])
     missing = np.repeat(np.repeat(np.isnan(amplitude), SURFACE_SCALE, axis=0), SURFACE_SCALE, axis=1)
     assert np.all(surface[missing] == INVALID_RGB)
 
 
-def test_surface_uses_scalar_bilinear_weights_and_separate_half_coverage_contour():
+@pytest.mark.parametrize("strength", [1., 1500., 6000.])
+def test_single_touch_feathers_without_losing_its_peak(strength):
     amplitude = np.zeros((ROWS, COLS))
     row, col = 5, 12
-    amplitude[row, col] = 1500
+    amplitude[row, col] = strength
     surface = contact_surface_rgb(amplitude, DEFAULT_CONTACT_SPAN)
-    y, x = SURFACE_SCALE * row + 7, SURFACE_SCALE * col + 7
-
-    # One interpolated sample lies within the footprint and one outside it.
-    fraction = (1 - 3 / SURFACE_SCALE) * (1 - 4 / SURFACE_SCALE)
-    expected = np.rint(WEAK_RGB + (np.subtract(STRONG_RGB, WEAK_RGB) * (1500 * fraction / 3000)))
-    np.testing.assert_array_equal(surface[y + 3, x + 4], expected)
-    np.testing.assert_array_equal(surface[y + 5, x + 5], UNLOADED_RGB)
+    y = SURFACE_SCALE * row + SURFACE_SCALE // 2
+    x = SURFACE_SCALE * col + SURFACE_SCALE // 2
+    np.testing.assert_array_equal(surface[y, x], amplitude_rgb(amplitude, DEFAULT_CONTACT_SPAN)[row, col])
     np.testing.assert_array_equal(surface[x, y], UNLOADED_RGB)
-    contact = np.any(surface != UNLOADED_RGB, axis=2)
-    assert surface[..., 0][contact].max() == surface[y, x, 0]
+    # The white channel contribution increases gradually over several pixels
+    # before the neighboring unloaded center. A binary hard edge fails this.
+    outward = surface[y, x:x + SURFACE_SCALE + 1, 1].astype(int)
+    assert outward[-1] == 255 and len(np.unique(outward)) >= 8
+    assert np.all((np.diff(outward) >= 0) & (np.diff(outward) < 64))
+    np.testing.assert_array_equal(outward, surface[y:y + SURFACE_SCALE + 1, x, 1])
+
+
+def test_diagonally_touching_contacts_keep_a_white_gap():
+    field = np.zeros((ROWS, COLS))
+    field[5, 5] = field[6, 6] = DEFAULT_CONTACT_SPAN
+    surface = contact_surface_rgb(field, DEFAULT_CONTACT_SPAN)
+    p = 5 * SURFACE_SCALE + SURFACE_SCALE // 2
+    offset = np.arange(SURFACE_SCALE + 1)
+    assert np.all(surface[p + offset, p + SURFACE_SCALE - offset] == UNLOADED_RGB)
 
 
 def test_surface_keeps_holes_separated_contacts_and_unknown_rows():
