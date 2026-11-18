@@ -6,7 +6,9 @@ import numpy as np
 import pytest
 
 from griptile_core.assembler import Assembler
-from griptile_core.contact_image import INVALID_RGB, STRONG_RGB, UNLOADED_RGB, WEAK_RGB
+from griptile_core.contact_image import (
+    CONTACT_COLOR_STOPS, INVALID_RGB, STRONG_RGB, UNLOADED_RGB, WEAK_RGB, amplitude_rgb,
+)
 from griptile_core.grid import LAYOUT_ID
 from griptile_core.protocol import Block, PROTOCOL_ID
 from griptile_core.serial_source import Batch
@@ -160,6 +162,7 @@ def test_qt_native_rgb_png_and_diagnostic_modes(monkeypatch, tmp_path):
     np.testing.assert_array_equal(restored, pixels)
     window.mode.setCurrentIndex(RAW_MODE)
     window.refresh()
+    assert not window.scale.isVisible()
     assert window.image.image[2, 3] == 43
     assert np.isnan(window.image.image[1, 0])
     window.mode.setCurrentIndex(DELTA_MODE)
@@ -211,10 +214,15 @@ def test_continuous_mode_png_selection_coordinates_and_native_export(monkeypatch
     assembler = Assembler(sensor_id=SENSOR)
     state = snapshot(assembler, 1, START)
     model.accept(state, 0)
-    model.accept_reference(profile_status())
+    status = profile_status()
+    status.span_adc = 2000.
+    model.accept_reference(status)
     field = np.zeros((20, 20), dtype=np.float32)
-    field[3, 12] = 3000
+    # The decoder and the viewer must use this reference's scale in both contact modes.
+    field[3, 7:13] = [1, 400, 800, 1200, 1600, 2400]
     field[10, 1] = np.nan
+    native = amplitude_rgb(field, status.span_adc)
+    model.accept_image(image(state, native))
     model.accept_response(response(state, field))
     clock_ns = 0
     requests = []
@@ -224,10 +232,17 @@ def test_continuous_mode_png_selection_coordinates_and_native_export(monkeypatch
     window.show()
     app.processEvents()
     window.refresh()
-    assert "接触 1 点" in window.legend.text() and "399/400" in window.legend.text()
+    assert window.scale.isVisible()
+    assert "接触 6 点" in window.legend.text() and "399/400" in window.legend.text()
     original = window.image.image
     assert original.shape == (300, 300, 3)
-    np.testing.assert_array_equal(original[3 * 15 + 7, 12 * 15 + 7], STRONG_RGB)
+    np.testing.assert_array_equal(original[7::15, 7::15], native)
+    np.testing.assert_array_equal(native[3, 7:13], [rgb for _, rgb in CONTACT_COLOR_STOPS])
+    gradient = window.scale.findChild(QtWidgets.QFrame, "contactGradient").grab().toImage()
+    for position, rgb in CONTACT_COLOR_STOPS:
+        x = round(position * (gradient.width() - 1))
+        swatch = gradient.pixelColor(x, gradient.height() // 2).getRgb()[:3]
+        np.testing.assert_allclose(swatch, rgb, atol=4)
     # The 300-pixel image still occupies [0,20) on both axes, including after mode switches.
     for row, col in ((0, 0), (19, 19), (3, 12), (17, 2)):
         scene = window.image.mapToScene(QtCore.QPointF((col + .5) * 15, (row + .5) * 15))
@@ -243,14 +258,16 @@ def test_continuous_mode_png_selection_coordinates_and_native_export(monkeypatch
     np.testing.assert_array_equal(data.reshape(300, 300, 3), original)
     window.reference_button.click()
     assert requests == [None] and window.mode.currentIndex() == SURFACE_MODE
-    clock_ns = 100_000_001
-    window.refresh()
-    assert np.all(window.image.image == INVALID_RGB)
     window.mode.setCurrentIndex(CONTACT_MODE)
     window.refresh()
-    assert window.image.image.shape == (20, 20, 3)
+    np.testing.assert_array_equal(window.image.image, native)
+    assert "接触 6 点" in window.legend.text() and "399/400" in window.legend.text()
     path = tmp_path / "native.png"
     window.save_png(path)
     assert QtGui.QImage(str(path)).size() == QtCore.QSize(20, 20)
+    clock_ns = 100_000_001
+    window.mode.setCurrentIndex(SURFACE_MODE)
+    window.refresh()
+    assert np.all(window.image.image == INVALID_RGB)
     window.close()
     app.processEvents()

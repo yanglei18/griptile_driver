@@ -10,7 +10,7 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from griptile_core.contact_image import (
-    DEFAULT_CONTACT_SPAN, INVALID_RGB, STRONG_RGB, UNLOADED_RGB, WEAK_RGB, contact_surface_rgb,
+    CONTACT_COLOR_STOPS, DEFAULT_CONTACT_SPAN, INVALID_RGB, UNLOADED_RGB, contact_surface_rgb,
 )
 
 from griptile_core.grid import ROWS, COLS
@@ -33,9 +33,30 @@ def _swatch(rgb, label):
     return '<span style="color:#%02x%02x%02x">■</span> %s' % (*rgb, label)
 
 
-CONTACT_LEGEND = "　".join(_swatch(rgb, name) for rgb, name in (
-    (UNLOADED_RGB, "无接触"), (WEAK_RGB, "弱接触"), (STRONG_RGB, "强接触"), (INVALID_RGB, "无有效测量或参考")
-))
+def _contact_legend():
+    legend = QtWidgets.QWidget()
+    layout = QtWidgets.QHBoxLayout(legend)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.addWidget(QtWidgets.QLabel(_swatch(UNLOADED_RGB, "无接触")))
+    layout.addSpacing(12)
+    layout.addWidget(QtWidgets.QLabel("弱接触"))
+    bar = QtWidgets.QFrame()
+    bar.setObjectName("contactGradient")
+    stops = ", ".join(f"stop:{position:g} {QtGui.QColor(*rgb).name()}"
+                      for position, rgb in CONTACT_COLOR_STOPS)
+    bar.setStyleSheet(f"background: qlineargradient(x1:0, y1:0, x2:1, y2:0, {stops});")
+    bar.setMinimumWidth(100)
+    bar.setMaximumWidth(240)
+    bar.setFixedHeight(12)
+    bar.setToolTip("蓝：弱　青绿：中等　黄橙：较强　红：达到满量程")
+    bar.setAccessibleName("接触强度色带")
+    bar.setAccessibleDescription(bar.toolTip())
+    layout.addWidget(bar, 1)
+    layout.addWidget(QtWidgets.QLabel("强接触"))
+    layout.addSpacing(12)
+    layout.addWidget(QtWidgets.QLabel(_swatch(INVALID_RGB, "无有效测量或参考")))
+    layout.addStretch()
+    return legend
 
 
 class ViewerWindow(QtWidgets.QMainWindow):
@@ -108,8 +129,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.map.scene().sigMouseClicked.connect(self.pick_cell)
         self.map.scene().sigMouseMoved.connect(self.inspect_cell)
         layout.addWidget(self.map, stretch=4)
-        self.scale = QtWidgets.QLabel(CONTACT_LEGEND)
-        self.scale.setTextFormat(QtCore.Qt.RichText)
+        self.scale = _contact_legend()
         layout.addWidget(self.scale)
         self.cell_label = QtWidgets.QLabel("点击单元查看曲线")
         layout.addWidget(self.cell_label)

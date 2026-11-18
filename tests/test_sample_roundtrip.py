@@ -184,7 +184,7 @@ def test_sample_bag_roundtrip(tmp_path, monkeypatch):
 def test_recorded_reference_rebuilds_native_contact_image(tmp_path, monkeypatch):
     """A recorder joining after calibration must retain that reference in the bag."""
     import numpy as np
-    from griptile_core.contact_image import INVALID_RGB, STRONG_RGB, UNLOADED_RGB
+    from griptile_core.contact_image import INVALID_RGB, UNLOADED_RGB, amplitude_rgb
 
     monkeypatch.setenv("ROS_DOMAIN_ID", str(101 + os.getpid() % 17))
     monkeypatch.setenv("ROS_AUTOMATIC_DISCOVERY_RANGE", "LOCALHOST")
@@ -238,11 +238,12 @@ def test_recorded_reference_rebuilds_native_contact_image(tmp_path, monkeypatch)
         assert len(message.data) == 1200
         return np.frombuffer(message.data, dtype=np.uint8).reshape(20, 20, 3)
 
+    expected_response = np.zeros((20, 20))
+    expected_response[2, 5], expected_response[15, 6] = 4398.5, 398.5
+    expected_colors = amplitude_rgb(expected_response, 3000)
+
     def two_touches(message):
-        rgb = pixels(message)
-        active = np.any(rgb != UNLOADED_RGB, axis=2)
-        return (active.sum() == 2 and np.array_equal(rgb[2, 5], STRONG_RGB)
-                and active[15, 6] and 0 < rgb[15, 6, 0] < rgb[2, 5, 0])
+        return np.array_equal(pixels(message), expected_colors)
 
     try:
         bag = tmp_path / "contacts"

@@ -78,15 +78,27 @@ def test_rgb_follows_configured_polarity_and_detector_hysteresis(direction, sign
 def test_fixed_colors_are_independent_of_other_taxels_and_clip_only_at_full_scale():
     detector = calibrated()
     values = BASELINE.copy()
-    values[:3] += [20, 1505, 3005]
+    # The detector subtracts the five-count release threshold from active taxels.
+    values[:6] += [605, 1205, 1805, 2405, 2990, 3005]
     first = image(detector, values)
-    weak, middle, full = first[0, :3]
-    assert weak[0] < middle[0] < full[0]
-    assert weak[1] > middle[1] > full[1]
-    assert weak[2] > middle[2] > full[2]
-    assert tuple(full) == STRONG_RGB
-    values[2] += 5000
+    np.testing.assert_array_equal(first[0, :4], [
+        (0, 176, 205), (34, 176, 100), (246, 217, 60), (247, 139, 37),
+    ])
+    assert tuple(first[0, 4]) != STRONG_RGB
+    assert tuple(first[0, 5]) == STRONG_RGB
+    values[5] += 5000
     np.testing.assert_array_equal(image(detector, values, time=2), first)
+
+
+@pytest.mark.parametrize("span", [1000., 3000.])
+def test_blue_on_first_contact_and_red_at_saturation_with_a_configured_span(span):
+    field = np.zeros((ROWS, COLS))
+    field[0, :5] = [np.nan, 0, 1.e-6 * span, span, span * 2]
+    np.testing.assert_array_equal(amplitude_rgb(field, span)[0, :5], [
+        (128, 128, 128), (255, 255, 255), (36, 64, 164), (220, 35, 38), (220, 35, 38),
+    ])
+    field[0, 5] = 0.2 * span
+    np.testing.assert_array_equal(amplitude_rgb(field, span)[0, 5], (0, 176, 205))
 
 
 def test_surface_preserves_all_measured_centers_and_invalid_taxel_footprints():
@@ -111,14 +123,12 @@ def test_surface_uses_scalar_bilinear_weights_and_separate_half_coverage_contour
     surface = contact_surface_rgb(amplitude, DEFAULT_CONTACT_SPAN)
     y, x = SURFACE_SCALE * row + 7, SURFACE_SCALE * col + 7
 
-    # One interpolated sample lies within the footprint and one outside it.
-    fraction = (1 - 3 / SURFACE_SCALE) * (1 - 4 / SURFACE_SCALE)
-    expected = np.rint(WEAK_RGB + (np.subtract(STRONG_RGB, WEAK_RGB) * (1500 * fraction / 3000)))
-    np.testing.assert_array_equal(surface[y + 3, x + 4], expected)
+    # The inside sample has 1500 * (1-3/15) * (1-4/15) = 880 ADC counts.
+    # Mapping those counts to RGB gives a point between cyan and green.
+    np.testing.assert_array_equal(surface[y + 3, x + 4], (16, 176, 156))
     np.testing.assert_array_equal(surface[y + 5, x + 5], UNLOADED_RGB)
     np.testing.assert_array_equal(surface[x, y], UNLOADED_RGB)
-    contact = np.any(surface != UNLOADED_RGB, axis=2)
-    assert surface[..., 0][contact].max() == surface[y, x, 0]
+    np.testing.assert_array_equal(surface[y, x], amplitude_rgb(amplitude, DEFAULT_CONTACT_SPAN)[row, col])
 
 
 def test_surface_keeps_holes_separated_contacts_and_unknown_rows():

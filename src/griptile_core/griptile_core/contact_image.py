@@ -8,8 +8,20 @@ from .grid import COLS, ROWS
 DEFAULT_CONTACT_SPAN = 3000.0  # Noise-gated ADC counts at full red.
 INVALID_RGB = (128, 128, 128)
 UNLOADED_RGB = (255, 255, 255)
-WEAK_RGB = (76, 42, 35)
-STRONG_RGB = (255, 0, 0)
+# Fractions of the configured display span, for positive responses only.
+# Zero response and missing measurements have their own colors above.
+CONTACT_COLOR_STOPS = (
+    (0.0, (36, 64, 164)),
+    (0.2, (0, 176, 205)),
+    (0.4, (34, 176, 100)),
+    (0.6, (246, 217, 60)),
+    (0.8, (247, 139, 37)),
+    (1.0, (220, 35, 38)),
+)
+WEAK_RGB = CONTACT_COLOR_STOPS[0][1]
+STRONG_RGB = CONTACT_COLOR_STOPS[-1][1]
+_STOP_LEVELS, _STOP_COLORS = zip(*CONTACT_COLOR_STOPS)
+_CHANNELS = tuple(zip(*_STOP_COLORS))
 SURFACE_SCALE = 15  # An odd scale puts every measured center exactly on a display pixel.
 
 
@@ -17,9 +29,9 @@ def _color_response(amplitude, valid, active, span):
     pixels = np.empty((*amplitude.shape, 3), dtype=np.uint8)
     pixels[:] = UNLOADED_RGB
     pixels[~valid] = INVALID_RGB
-    strength = np.minimum(amplitude[active] / span, 1.0)
-    color_range = np.subtract(STRONG_RGB, WEAK_RGB)
-    pixels[active] = np.rint(WEAK_RGB + strength[:, None] * color_range)
+    strength = amplitude[active] / span
+    channels = [np.interp(strength, _STOP_LEVELS, channel) for channel in _CHANNELS]
+    pixels[active] = np.rint(np.column_stack(channels))
     return pixels
 
 

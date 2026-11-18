@@ -2,9 +2,9 @@
 
 适用于单块 USB 串口夹爪触觉阵列的 ROS 2 驱动和二维查看器。每个触觉单元对应 RGB 图像中的一个像素，默认窗口直接呈现夹爪与物体的接触位置、覆盖范围和相对强弱。点击单元可查看 ADC 曲线。查看器、录制器与其他 ROS 节点可以同时订阅同一驱动。[English guide](docs/README.en.md)
 
-![由正式驱动发布的模拟无载、环形和双点接触图](docs/contact-footprints.png)
+![同一显示量程下的模拟无载、环形轻压、环形压紧及双点接触](docs/contact-footprints.png)
 
-上图使用模拟输入，按原始行列放大。环形的中心留白，两个分离接触区之间也保留空隙。[下载原生 20×20 RGB 示例](docs/contact-ring.png) · [查看窗口截图](docs/viewer-demo.png)
+上图是模拟触点在默认连续视图中的显示效果。轻压和压紧使用同一组环形触点，颜色随响应增强而变化，环中央仍为白色。[下载原生 20×20 RGB 示例](docs/contact-ring.png) · [查看窗口截图](docs/viewer-demo.png)
 
 ## 构建
 
@@ -38,7 +38,7 @@ ros2 launch griptile_driver sensor.launch.py port:=/dev/ttyUSB0 gui:=true
 | 像素颜色 | 含义 |
 | --- | --- |
 | 白色 | 该点有有效测量，变化处于无载噪声范围 |
-| 暗红褐色至鲜红 | 接触响应由弱到强，超过所选量程后保持纯红 |
+| 深蓝 → 青 → 绿 → 黄 → 橙 → 红 | 接触响应由弱到强，达到所设量程上限后显示红色 |
 | 灰色 | 该点缺少可用参考或新鲜读数 |
 
 切换到「接触图 RGB」可查看 20 行 × 20 列的三通道 `rgb8`，第 0 行在上、第 0 列在左。每个像素大小相同。界面按最近邻放大，接触模式导出的是原生 20×20 彩色 PNG。一个接触区占据的像素数量反映阵列上被触及的范围；细节分辨率受触点间距限制。颜色表示相对无载的 ADC 变化，换算牛顿、帕斯卡或平方毫米需要对应的力学标定或几何尺寸。
@@ -47,7 +47,7 @@ ros2 launch griptile_driver sensor.launch.py port:=/dev/ttyUSB0 gui:=true
 
 ![同一组模拟触点的原生显示与连续估算，分别展示环形凸缘和三道宽纹](docs/contact-surface-comparison.png)
 
-显示使用固定色域，默认去噪后 3000 ADC 对应满红。启动时传入 `contact_span_adc:=6000.0` 可增大显示量程。默认 `contact_direction:=both` 同时接受 ADC 向上或向下的变化，已知夹爪受压极性时可选 `increase` 或 `decrease`。原始 ADC、有符号 ΔADC 和快照 CSV 均可用于诊断。已核验 USB 身份的设备支持保存和复用无载参考。
+每个触点测得一个响应值，三个 RGB 通道共同表示其强度。色标在帧间固定，同一响应总是显示同一颜色。默认去噪后 3000 ADC 对应色标顶端的红色。启动时传入 `contact_span_adc:=6000.0` 可增大显示量程。默认 `contact_direction:=both` 同时接受 ADC 向上或向下的变化，已知夹爪受压极性时可选 `increase` 或 `decrease`。原始 ADC、有符号 ΔADC 和快照 CSV 均可用于诊断。已核验 USB 身份的设备支持保存和复用无载参考。
 
 无界面运行时也可以在夹爪张开的状态下采集参考。
 
