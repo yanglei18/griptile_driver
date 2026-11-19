@@ -71,7 +71,7 @@ def _settle(window, record, qt_app):
     pytest.fail(f"touch print did not settle: {window.status.text()}")
 
 
-def test_manual_capture_actual_timing_shared_crop_resize_and_export(display, qt_app, tmp_path):
+def test_manual_capture_actual_timing_full_array_and_export(display, qt_app, tmp_path):
     window, capture = display
     assert not window.isModal()
     assert not window.shutter_button.isEnabled()
@@ -95,7 +95,7 @@ def test_manual_capture_actual_timing_shared_crop_resize_and_export(display, qt_
     assert "1 个接触测点" in window.plate.accessibleDescription()
     assert "三帧响应" in window.plate.accessibleDescription()
     assert "2,600 ADC" in window.plate.peak_text and "2000 ADC" in window.plate.accessibleDescription()
-    assert window.plate.bounds == QtCore.QRect(0, 6, 7, 6)
+    assert window.plate.bounds == ui.FULL_ARRAY and not window.zoom.isChecked()
     assert window.export_button.isEnabled() and window.zoom.isEnabled()
     assert len(window.plate.images) == 4
     center = SURFACE_SCALE // 2
@@ -108,14 +108,13 @@ def test_manual_capture_actual_timing_shared_crop_resize_and_export(display, qt_
         rgb = pic.pixelColor(col * SURFACE_SCALE + center, row * SURFACE_SCALE + center).getRgb()[:3]
         assert rgb == contact_intensity_rgb(adc, record.span_adc)
 
-    cropped = window.plate.export_image()
+    full_array = window.plate.export_image()
     # The exported color key uses the same fixed palette as the measured pixels.
     margin = 640 // 24
     for level, rgb in CONTACT_COLOR_STOPS:
         x = int(2 * (margin + level * (640 - 2 * margin)))
         x = min(x, 2 * (640 - margin) - 1)
-        np.testing.assert_allclose(cropped.pixelColor(x, 1140).getRgb()[:3], rgb, atol=3)
-    window.zoom.setChecked(False)
+        np.testing.assert_allclose(full_array.pixelColor(x, 1140).getRgb()[:3], rgb, atol=3)
     window.resize(335, 475)
     qt_app.processEvents()
     path = tmp_path / "actual.png"
@@ -124,14 +123,14 @@ def test_manual_capture_actual_timing_shared_crop_resize_and_export(display, qt_
     assert loaded.size() == QtCore.QSize(1280, 1200)
     assert loaded.pixelColor(2, 2) == ui.GROUND
     assert loaded.pixelColor(2, 1198) == ui.PAPER
-    assert loaded.convertToFormat(cropped.format()) != cropped
+    assert loaded.convertToFormat(full_array.format()) == full_array
     assert window.plate.record is record
     capture.release()
     window.history_button.click()
     assert window.plate.record is None and not window.plate.images and window.plate.empty_text == "无接触"
 
 
-def test_crop_and_contact_count_follow_support_while_proofs_keep_weak_responses(display, qt_app):
+def test_manual_zoom_uses_measured_support_while_proofs_keep_weak_responses(display, qt_app):
     window, capture = display
     base = _sample()
     frames = np.array(base.frames)
@@ -143,12 +142,35 @@ def test_crop_and_contact_count_follow_support_while_proofs_keep_weak_responses(
     shaped = replace(base, frames=tuple(frames), footprints=tuple(masks))
     capture.press(shaped)
     _settle(window, shaped, qt_app)
-    assert window.plate.bounds == QtCore.QRect(0, 6, 7, 11)  # Includes the earlier weak contact.
+    assert window.plate.bounds == ui.FULL_ARRAY and not window.zoom.isChecked()
+    window.zoom.click()
+    locked = QtCore.QRect(0, 6, 7, 11)  # Includes the earlier weak contact.
+    assert window.plate.bounds == locked
     assert window.plate.footprint_label() == "1 个接触测点"
     x, y = 19 * SURFACE_SCALE + SURFACE_SCALE // 2, SURFACE_SCALE // 2
     master, _, _, latest = window.plate.images
     assert latest.pixelColor(x, y).getRgb()[:3] == contact_intensity_rgb(700, shaped.span_adc)
     assert master.pixelColor(x, y) == ui.GROUND
+
+    # A later footprint and a saved print each have a different close-up.
+    # Neither should move the region selected by the user.
+    shifted = replace(shaped, frames=tuple(np.roll(frames, 8, axis=2)),
+                      footprints=tuple(np.roll(masks, 8, axis=2)))
+    capture.live = shifted
+    _settle(window, shifted, qt_app)
+    assert window.plate.bounds == locked
+    capture.latest = base
+    capture.release()
+    window.refresh()
+    assert window.zoom.isEnabled() and window.plate.bounds == locked
+    window.history_button.click()
+    _settle(window, base, qt_app)
+    assert window.plate.bounds == locked
+    enlarged = window.plate.export_image()
+    window.zoom.click()
+    assert window.plate.bounds == ui.FULL_ARRAY
+    assert window.plate.export_image() != enlarged
+    window.history_button.click()
 
     unknown = replace(shaped, footprints=None)
     capture.press(unknown)
@@ -157,6 +179,46 @@ def test_crop_and_contact_count_follow_support_while_proofs_keep_weak_responses(
     assert "接触范围待测" in window.plate.accessibleDescription()
     assert window.plate.face_style == "response"
     assert window.plate.images[0].pixelColor(x, y) == latest.pixelColor(x, y)
+
+
+def test_edge_taxel_stays_registered_when_proofs_arrive_and_style_changes(display, qt_app, monkeypatch):
+    window, capture = display
+    # Mark exactly one native taxel in the face so its painted position and size
+    # can be measured independently of the palette, adjacent ink and Qt text.
+    marker = QtGui.QColor("#ff00ff")
+
+    def render(record, style):
+        blank = np.zeros((20 * SURFACE_SCALE, 20 * SURFACE_SCALE, 3), np.uint8)
+        face = blank.copy()
+        face[-SURFACE_SCALE:, :SURFACE_SCALE] = marker.getRgb()[:3]
+        return (face, blank, blank, blank) if len(record.frames) == 3 else (face,)
+
+    def painted_taxel():
+        boxes = []
+        for image in (window.plate.grab().toImage(), window.plate.export_image()):
+            mask = image.createMaskFromColor(marker.rgb(), QtCore.Qt.MaskOutColor)
+            box = QtGui.QRegion(QtGui.QBitmap.fromImage(mask)).boundingRect()
+            assert 0 < box.width() < image.width() / 20
+            assert box.left() < image.width() / 2
+            boxes.append(box)
+        return boxes
+
+    monkeypatch.setattr(ui, "_render_exposures", render)
+    base = _sample()
+    fields = np.array(base.frames)
+    fields[:, 19, 0] = 2000
+    triplet = replace(base, frames=tuple(fields), footprints=tuple(fields > 0))
+    first = replace(triplet, frames=triplet.frames[:1], stamps_ns=triplet.stamps_ns[:1],
+                    footprints=triplet.footprints[:1])
+    capture.press(first)
+    _settle(window, first, qt_app)
+    expected = painted_taxel()
+    capture.live = triplet
+    _settle(window, triplet, qt_app)
+    assert painted_taxel() == expected
+    window.style_combo.setCurrentIndex(window.style_combo.findData("response"))
+    _settle(window, triplet, qt_app)
+    assert painted_taxel() == expected
 
 
 def test_first_frame_shows_its_face_before_three_exposures_exist(display, qt_app):

@@ -104,7 +104,6 @@ class _PrintPlate(QtWidgets.QWidget):
         self.face_style = "imprint"
         self.peak_text = ""
         self.empty_text = "等待有效读数"
-        self.zoomed = True
         self.setMinimumSize(300, 320)
         self.setAccessibleName("触印与三帧响应")
 
@@ -114,7 +113,6 @@ class _PrintPlate(QtWidgets.QWidget):
             return
         self.record = None
         self.images = self.proof_labels = ()
-        self.bounds = FULL_ARRAY
         self.incomplete = self.historical = False
         self.missing_history = False
         self.peak_text = ""
@@ -126,7 +124,6 @@ class _PrintPlate(QtWidgets.QWidget):
     def assign(self, record, images, *, historical, style):
         self.record = record
         self.images = tuple(_qimage(image) for image in images)
-        self.bounds = _contact_bounds(record.footprints)
         self.historical = historical
         self.face_style = style
         last = record.stamps_ns[-1]
@@ -173,7 +170,8 @@ class _PrintPlate(QtWidgets.QWidget):
         margin = min(28, max(12, width // 24))
         title = min(48, max(30, width // 14))
         has_proofs = len(self.images) > 1
-        proof_height = min(188, max(116, height // 3)) if has_proofs else 65
+        # Reserve the proof strip from the first frame so adding exposures cannot move the array.
+        proof_height = min(188, max(116, height // 3))
         hero = height - proof_height
         painter.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, not self.incomplete)
         painter.fillRect(rect(0, 0, width, height), GROUND)
@@ -203,7 +201,7 @@ class _PrintPlate(QtWidgets.QWidget):
         _text(painter, rect(margin, hero + 4, width - 2 * margin, 22), proof_note, INK, 13)
         _text(painter, rect(margin, hero + 4, width - 2 * margin, 22),
               self.peak_text, INK, 12, right=True)
-        bounds = self.bounds if self.zoomed else FULL_ARRAY
+        bounds = self.bounds
         if bounds != FULL_ARRAY and width >= 380:
             # Locator shows the selected region in the full physical array.
             locator = rect(width - margin - 130, 17, 33, 33)
@@ -215,8 +213,7 @@ class _PrintPlate(QtWidgets.QWidget):
                                   bounds.width() / COLS * locator.width(),
                                   bounds.height() / ROWS * locator.height()))
         view_top = max(57, title + 19)
-        footer = 55 if imprint else 34
-        view = rect(margin, view_top, width - 2 * margin, hero - view_top - footer)
+        view = rect(margin, view_top, width - 2 * margin, hero - view_top - 55)
         _draw_exposure(painter, view, self.images[0], bounds)
         if imprint:
             _draw_ink_key(painter, margin, width - 2 * margin, hero - 51, has_proofs, self.missing_history)
@@ -284,8 +281,7 @@ class ContactPrintDialog(QtWidgets.QDialog):
             controls.addWidget(button)
         controls.addStretch()
         self.zoom = QtWidgets.QCheckBox("放大接触区", self)
-        self.zoom.setChecked(True)
-        self.zoom.setToolTip("三个时刻共用同一取景。取消可查看完整阵列。")
+        self.zoom.setToolTip("锁定此刻的接触区域。取消后查看完整的 20 × 20 阵列。")
         controls.addWidget(self.zoom)
         layout.addLayout(controls)
         self.status = QtWidgets.QLabel(self)
@@ -311,7 +307,10 @@ class ContactPrintDialog(QtWidgets.QDialog):
         self.style_combo.currentIndexChanged.connect(self.refresh)
 
     def _set_zoom(self, enabled):
-        self.plate.zoomed = enabled
+        record = self.plate.record
+        self.plate.bounds = _contact_bounds(record.footprints) if enabled and record is not None else FULL_ARRAY
+        if enabled and self.plate.bounds == FULL_ARRAY:
+            self.zoom.setChecked(False)
         self.plate.update()
 
     def showEvent(self, event):
@@ -375,7 +374,8 @@ class ContactPrintDialog(QtWidgets.QDialog):
         self.history_button.setText("返回实时" if historical else "上次留印")
         self.shutter_button.setEnabled(not historical and capture.can_snapshot)
         self.export_button.setEnabled(historical and self.plate.record is not None)
-        self.zoom.setEnabled(self.plate.record is not None and self.plate.bounds != FULL_ARRAY)
+        self.zoom.setEnabled(self.zoom.isChecked() or
+                             (self.plate.record is not None and self.plate.record.footprints is not None))
         if self._error:
             text = "无法生成触印　" + self._error
         elif historical:

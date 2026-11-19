@@ -8,6 +8,7 @@
 - Show the contact footprint from the first supported observation. Trace each patch and its holes from noise-referenced native taxels, with three full response maps for comparison once the time history is available.
 - Use a dark three-exposure imprint as the default contact print, with copper, cyan and ivory lines confined to the current measured footprint. Keep the calibrated color map available for viewing and export.
 - Open directly on the contact print in live and replay sessions with `imprint:=true`.
+- Keep the contact print at a fixed full-array scale as the footprint changes and the three exposures arrive. Manual zoom locks the selected region for live viewing, history and PNG export.
 
 - Extract the 44-byte, 20-column sensor protocol, serial ownership and rolling ADC grid into a standalone package.
 - Introduce sensor-scoped ROS 2 interfaces for raw rows, state, diagnostics and source metadata.
