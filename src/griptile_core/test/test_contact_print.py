@@ -148,3 +148,73 @@ def test_invalid_fields_are_rejected(fields):
 def test_invalid_span_is_rejected(span):
     with pytest.raises(ValueError):
         render_contact_print(np.zeros((3, *SHAPE)), span)
+
+
+def test_registered_inks_show_growth_hold_and_release_with_the_same_color_proofs():
+    fields = np.stack([np.full(SHAPE, v, dtype=np.float32) for v in (200, 900, 2200)])
+    region = np.ones(SHAPE, dtype=bool)
+    growing, proofs = render_contact_print(fields, footprint=region, style="imprint")
+    falling, inverse_proofs = render_contact_print(fields[::-1], footprint=region, style="imprint")
+    assert growing[100, 100, 0] > growing[100, 100, 2] + 12
+    assert falling[100, 100, 0] + 12 < falling[100, 100, 2]
+    np.testing.assert_array_equal(proofs, inverse_proofs[::-1])
+    for proof, field in zip(proofs, fields):
+        np.testing.assert_array_equal(proof, contact_surface_rgb(field, 3000.))
+
+    # On a stationary slope, contour bands remain visible inside the patch;
+    # taking three equal exposures registers the same near-neutral ink as one.
+    stationary = np.broadcast_to(np.linspace(0, 9000., 20), SHAPE)
+    single = render_contact_face(stationary, 3000., region, style="imprint")
+    held, _ = render_contact_print(np.stack([stationary] * 3), footprint=region, style="imprint")
+    np.testing.assert_allclose(held, single, atol=1)
+    x = np.where(np.max(np.diff(held[150].astype(int), axis=0), axis=1) > 35)[0]
+    assert len(x) >= 6
+    np.testing.assert_allclose(single, render_contact_face(2 * stationary, 6000., region, style="imprint"))
+
+
+def test_imprint_ink_cannot_extend_the_latest_footprint_or_close_a_hole():
+    fields = np.full((3, *SHAPE), 2200.)
+    fields[0, 1:3, 13:17] = 8400.  # Former contact outside the current patch.
+    region = np.zeros(SHAPE, dtype=bool)
+    region[3:12, 3:13] = True
+    region[5:10, 5:11] = False
+    region[16, 17] = True
+    master, _ = render_contact_print(fields, footprint=region, style="imprint")
+    ground = np.array((13, 16, 19))
+    visible = np.any(master != ground, axis=2)
+    native = visible[CENTER::SURFACE_SCALE, CENTER::SURFACE_SCALE]
+    np.testing.assert_array_equal(native, region)
+    col = 8 * SURFACE_SCALE + CENTER
+    assert np.flatnonzero(np.diff(visible[:, col])).tolist() == [44, 74, 149, 179]
+    assert master[45, col, 0] > master[46, col, 0]  # Outer edge.
+    assert master[74, col, 0] > master[73, col, 0]  # Hole edge.
+    empty, _ = render_contact_print(fields, footprint=np.zeros_like(region), style="imprint")
+    assert np.all(empty == ground)
+
+
+def test_imprint_missing_history_shows_current_neutral_ink_and_latest_missing_stays_gray():
+    rows, cols = np.indices(SHAPE)
+    current = np.where(cols < 10, 500., 2400.) + rows * 75.
+    fields = np.stack([current / 4, current / 2, current])
+    fields[0, 3:7, 4:9] = np.nan
+    fields[1, 10:17, 1:6] = np.nan
+    fields[-1, 8, 9] = np.nan
+    region = np.ones(SHAPE, dtype=bool)
+    master, proofs = render_contact_print(fields, footprint=region, style="imprint")
+    single = render_contact_face(fields[-1], 3000., region, style="imprint")
+    for r, c in ((4, 5), (13, 3)):
+        sample = np.s_[r * SURFACE_SCALE:(r + 1) * SURFACE_SCALE, c * SURFACE_SCALE:(c + 1) * SURFACE_SCALE]
+        np.testing.assert_array_equal(master[sample], single[sample])
+        assert not np.all(master[sample] == INVALID_RGB)
+    assert np.all(master[8 * SURFACE_SCALE:9 * SURFACE_SCALE, 9 * SURFACE_SCALE:10 * SURFACE_SCALE] == INVALID_RGB)
+    assert np.all(proofs[0, 4 * SURFACE_SCALE:5 * SURFACE_SCALE, 5 * SURFACE_SCALE:6 * SURFACE_SCALE] == INVALID_RGB)
+    assert master[200, 200, 0] > master[200, 200, 2]
+
+
+def test_style_fallback_uses_measured_response_and_rejects_unknown_styles():
+    fields = np.full((3, *SHAPE), 2400.)
+    master, proofs = render_contact_print(fields, style="imprint")
+    np.testing.assert_array_equal(master, proofs[-1])
+    np.testing.assert_array_equal(render_contact_face(fields[-1], style="imprint"), master)
+    with pytest.raises(ValueError, match="style"):
+        render_contact_print(fields, style="unknown")

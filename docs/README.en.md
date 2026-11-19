@@ -51,11 +51,11 @@ ros2 service call /tactile/sensor_0/set_contact_reference griptile_msgs/srv/SetC
 
 ### See the shape of the contact footprint
 
-Click **触印** beside the GripTile name. The large image shows the current contact footprint as soon as the first contact is observed. A boundary traces the outer edges and supported holes of each patch. Color inside the footprint shows the local response. Separate patches and gaps remain visible. A footprint reaching the edge of the sensor is clipped there. Clear **放大接触区** to locate it on the full array.
+Click **触印** beside the GripTile name. The default print uses a black ground. A single observation produces a neutral impression. Once three exposures are available, their equal-response lines are registered inside the latest measured footprint. Copper highlights growing responses, cyan highlights receding responses, and aligned impressions approach ivory. The latest observation determines the outer edges and holes. Separate patches stay separate and the live print clears on release. Clear **放大接触区** to locate the imprint on the full array.
 
 Once sufficient observations are available, three color panels show the responses about 600 ms ago, 300 ms ago and at the latest sample, with the same crop and color scale. These panels include weak readings outside the detected footprint and help explain how its shape and strength change during loading and release.
 
-Each print stores the display span from its acquisition. Responses above that span stay red, while the peak readout retains the last exposure's actual ADC response. The known-load workflow provides a separate force estimate in newtons.
+Select **响应** to color the large contact footprint on the same fixed ADC scale as the three response panels. Values above the recorded span stay red, while the peak readout retains the last exposure's actual ADC response. Saved prints can be reviewed in either style and exported with the selected style and its legend. The known-load workflow provides a separate force estimate in newtons.
 
 Use the existing unloaded reference. A taxel reaching eight times its own threshold seeds a patch and continues to be tracked down to twice that threshold. Side-adjacent taxels at or above twice their own thresholds extend that footprint in the current frame. The boundary is interpolated between measured points. Equalization affects the displayed colors. The count describes native taxels included in the footprint. A complete observation with no tracked contact clears the live image immediately. A data gap displays a waiting state.
 

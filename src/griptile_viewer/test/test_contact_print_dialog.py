@@ -95,13 +95,15 @@ def test_manual_capture_actual_timing_shared_crop_resize_and_export(display, qt_
     assert "1 个接触测点" in window.plate.accessibleDescription()
     assert "三帧响应" in window.plate.accessibleDescription()
     assert "2,600 ADC" in window.plate.peak_text and "2000 ADC" in window.plate.accessibleDescription()
-    assert window.plate.bounds == QtCore.QRect(0, 5, 8, 8)
+    assert window.plate.bounds == QtCore.QRect(0, 6, 7, 6)
     assert window.export_button.isEnabled() and window.zoom.isEnabled()
     assert len(window.plate.images) == 4
     center = SURFACE_SCALE // 2
     master, first, middle, last = window.plate.images
     first_cell = QtCore.QPoint(SURFACE_SCALE + center, 10 * SURFACE_SCALE + center)
-    assert master.pixelColor(first_cell).getRgb()[:3] == UNLOADED_RGB
+    assert window.style_combo.currentData() == "imprint" and window.plate.face_style == "imprint"
+    assert master.pixelColor(first_cell) == ui.GROUND
+    assert "暖铜增强" in window.plate.accessibleDescription()
     for pic, row, col, adc in ((first, 10, 1, 4000), (middle, 7, 5, 1500), (last, 7, 4, 2600)):
         rgb = pic.pixelColor(col * SURFACE_SCALE + center, row * SURFACE_SCALE + center).getRgb()[:3]
         assert rgb == contact_intensity_rgb(adc, record.span_adc)
@@ -141,18 +143,19 @@ def test_crop_and_contact_count_follow_support_while_proofs_keep_weak_responses(
     shaped = replace(base, frames=tuple(frames), footprints=tuple(masks))
     capture.press(shaped)
     _settle(window, shaped, qt_app)
-    assert window.plate.bounds == QtCore.QRect(0, 5, 8, 13)  # Includes the earlier weak contact.
+    assert window.plate.bounds == QtCore.QRect(0, 6, 7, 11)  # Includes the earlier weak contact.
     assert window.plate.footprint_label() == "1 个接触测点"
     x, y = 19 * SURFACE_SCALE + SURFACE_SCALE // 2, SURFACE_SCALE // 2
     master, _, _, latest = window.plate.images
     assert latest.pixelColor(x, y).getRgb()[:3] == contact_intensity_rgb(700, shaped.span_adc)
-    assert master.pixelColor(x, y).getRgb()[:3] == UNLOADED_RGB
+    assert master.pixelColor(x, y) == ui.GROUND
 
     unknown = replace(shaped, footprints=None)
     capture.press(unknown)
     _settle(window, unknown, qt_app)
     assert not window.zoom.isEnabled() and window.plate.bounds == ui.FULL_ARRAY
     assert "接触范围待测" in window.plate.accessibleDescription()
+    assert window.plate.face_style == "response"
     assert window.plate.images[0].pixelColor(x, y) == latest.pixelColor(x, y)
 
 
@@ -165,6 +168,7 @@ def test_first_frame_shows_its_face_before_three_exposures_exist(display, qt_app
     _settle(window, first, qt_app)
     assert len(window.plate.images) == 1 and window.plate.proof_labels == ("此刻",)
     assert "等待三帧对照" in window.plate.accessibleDescription()
+    assert "灰白为单帧印纹" in window.plate.accessibleDescription() and "暖铜增强" not in window.plate.accessibleDescription()
     assert window.plate.footprint_label() == "1 个接触测点"
     assert not window.shutter_button.isEnabled() and not window.export_button.isEnabled()
     capture.live = triplet
@@ -185,10 +189,10 @@ def test_stale_render_cannot_replace_new_stream_and_unchanged_print_is_cached(
     release = Event()
     render = ui.render_contact_print
 
-    def slow(frames, span, footprint):
+    def slow(frames, span, footprint, *, style):
         jobs.append(id(frames))
         assert release.wait(4)
-        return render(frames, span, footprint)
+        return render(frames, span, footprint, style=style)
 
     monkeypatch.setattr(ui, "render_contact_print", slow)
     try:
@@ -267,10 +271,10 @@ def test_replacing_live_segment_discards_in_flight_preview_without_an_intervenin
     blocker = Event()
     render = ui.render_contact_print
 
-    def render_after_release(frames, span, footprint):
+    def render_after_release(frames, span, footprint, *, style):
         if frames is first.frames:
             assert blocker.wait(4)
-        return render(frames, span, footprint)
+        return render(frames, span, footprint, style=style)
 
     monkeypatch.setattr(ui, "render_contact_print", render_after_release)
     try:
@@ -284,3 +288,41 @@ def test_replacing_live_segment_discards_in_flight_preview_without_an_intervenin
         blocker.set()
     _settle(window, second, qt_app)
     assert window.plate.record is second and not window.plate.historical
+
+
+def test_style_switch_rejects_old_render_and_exports_selected_style(display, qt_app, monkeypatch, tmp_path):
+    window, capture = display
+    record = _sample(span_adc=1500)
+    capture.latest = record
+    window.refresh()
+    blocker = Event()
+    render = ui.render_contact_print
+    styles = []
+
+    def slow_ink(frames, span, footprint, *, style):
+        styles.append(style)
+        if style == "imprint":
+            assert blocker.wait(4)
+        return render(frames, span, footprint, style=style)
+
+    monkeypatch.setattr(ui, "render_contact_print", slow_ink)
+    try:
+        window.history_button.click()
+        window.style_combo.setCurrentIndex(window.style_combo.findData("response"))
+        assert not window.export_button.isEnabled()
+    finally:
+        blocker.set()
+    _settle(window, record, qt_app)
+    assert styles == ["imprint", "response"] and window.plate.face_style == "response"
+    assert "主图按响应强度着色" in window.plate.accessibleDescription()
+    response_face, *proofs = window.plate.images
+    assert response_face.pixelColor(0, 0).getRgb()[:3] == UNLOADED_RGB
+    path = tmp_path / "response.png"
+    window.save_png(path)
+    response_export = QtGui.QImage(str(path))
+    window.style_combo.setCurrentIndex(window.style_combo.findData("imprint"))
+    _settle(window, record, qt_app)
+    assert window.plate.face_style == "imprint" and window.plate.images[0].pixelColor(0, 0) == ui.GROUND
+    assert list(window.plate.images[1:]) == proofs
+    window.save_png(path)
+    assert QtGui.QImage(str(path)) != response_export

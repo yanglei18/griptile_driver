@@ -16,6 +16,7 @@ PAPER = QtGui.QColor("#ede8d9")
 INK = QtGui.QColor("#232a2c")
 SUBTLE = QtGui.QColor("#62675f")
 FULL_ARRAY = QtCore.QRect(0, 0, COLS, ROWS)
+INK_KEY = (("#ce8959", "暖铜", "增强"), ("#61b8c3", "青色", "回落"), ("#d8d6c8", "灰白", "三帧相近"))
 
 
 def _contact_bounds(footprints):
@@ -27,7 +28,7 @@ def _contact_bounds(footprints):
         return FULL_ARRAY
     area = QtCore.QRect(QtCore.QPoint(int(cols.min()), int(rows.min())),
                         QtCore.QPoint(int(cols.max()), int(rows.max())))
-    return area.adjusted(-2, -2, 2, 2).intersected(FULL_ARRAY)
+    return area.adjusted(-1, -1, 1, 1).intersected(FULL_ARRAY)
 
 
 def _qimage(pixels):
@@ -36,11 +37,11 @@ def _qimage(pixels):
                         data.strides[0], QtGui.QImage.Format_RGB888).copy()
 
 
-def _render_exposures(record):
+def _render_exposures(record, style):
     footprint = record.footprints[-1] if record.footprints is not None else None
     if len(record.frames) == 1:
-        return (render_contact_face(record.frames[-1], record.span_adc, footprint),)
-    face, proofs = render_contact_print(record.frames, record.span_adc, footprint)
+        return (render_contact_face(record.frames[-1], record.span_adc, footprint, style=style),)
+    face, proofs = render_contact_print(record.frames, record.span_adc, footprint, style=style)
     return (face, *proofs)
 
 
@@ -77,6 +78,17 @@ def _draw_response_scale(painter, x, width, bottom, span_adc):
     _text(painter, label, f"≥{span_adc:g} ADC · 红色饱和", SUBTLE, 12, right=True)
 
 
+def _draw_ink_key(painter, x, width, y, has_proofs, has_missing_history):
+    items = INK_KEY if has_proofs else (("#d8d6c8", "灰白", "单帧印纹"),)
+    if has_missing_history:
+        items = (*INK_KEY[:2], ("#d8d6c8", "灰白", "中性"))
+    cell = width / len(items)
+    for i, (color, ink, meaning) in enumerate(items):
+        left = x + i * cell
+        painter.fillRect(QtCore.QRectF(left, y + 7, 7, 7), QtGui.QColor(color))
+        _text(painter, QtCore.QRectF(left + 12, y, cell - 12, 20), ink + " " + meaning, PAPER, 12)
+
+
 class _PrintPlate(QtWidgets.QWidget):
     """Paint the same registered composition to a window or an export device."""
 
@@ -87,42 +99,55 @@ class _PrintPlate(QtWidgets.QWidget):
         self.bounds = FULL_ARRAY
         self.proof_labels = ()
         self.incomplete = False
+        self.missing_history = False
         self.historical = False
+        self.face_style = "imprint"
         self.peak_text = ""
         self.empty_text = "等待有效读数"
         self.zoomed = True
         self.setMinimumSize(300, 320)
-        self.setAccessibleName("接触面与三帧响应")
+        self.setAccessibleName("触印与三帧响应")
 
-    def clear(self, message):
-        if self.record is None and self.empty_text == message and self.accessibleDescription() == message:
+    def clear(self, message, style):
+        if (self.record is None and self.empty_text == message and self.face_style == style
+                and self.accessibleDescription() == message):
             return
         self.record = None
         self.images = self.proof_labels = ()
         self.bounds = FULL_ARRAY
         self.incomplete = self.historical = False
+        self.missing_history = False
         self.peak_text = ""
+        self.face_style = style
         self.empty_text = message
         self.setAccessibleDescription(message)
         self.update()
 
-    def assign(self, record, images, *, historical):
+    def assign(self, record, images, *, historical, style):
         self.record = record
         self.images = tuple(_qimage(image) for image in images)
         self.bounds = _contact_bounds(record.footprints)
         self.historical = historical
+        self.face_style = style
         last = record.stamps_ns[-1]
         self.proof_labels = tuple(f"{round((last - t) / 1_000_000)} 毫秒前"
                                   for t in record.stamps_ns[:-1]) + (("取印时" if historical else "此刻"),)
         self.incomplete = not np.isfinite(record.frames).all()
         newest = record.frames[-1]
+        self.missing_history = any((~np.isfinite(past) & np.isfinite(newest)).any() for past in record.frames[:-1])
         valid = newest[np.isfinite(newest)]
         peak = f"{valid.max():,.1f}".rstrip("0").rstrip(".") if valid.size else "—"
         self.peak_text = f"{self.proof_labels[-1]}峰值 {peak} ADC"
         history = "三帧响应，" + "、".join(self.proof_labels) if len(images) > 1 else "等待三帧对照"
-        self.setAccessibleDescription(self.caption() + "。" + self.footprint_label() + "。" + history + "。"
-                                      + f"红色表示达到或超过 {record.span_adc:g} ADC。"
-                                      + self.peak_text)
+        if style == "imprint":
+            color_key = ("暖铜增强，青色回落，灰白三帧相近。" if len(images) > 1 else "灰白为单帧印纹。")
+            if self.missing_history:
+                color_key += "历史缺测的位置使用中性墨。"
+        else:
+            color_key = "主图按响应强度着色。"
+        scale = f"红色表示达到或超过 {record.span_adc:g} ADC。" if len(images) > 1 or style == "response" else ""
+        self.setAccessibleDescription(self.caption() + "。" + self.footprint_label() + "。" + color_key
+                                      + history + "。" + scale + self.peak_text)
         self.update()
 
     def caption(self):
@@ -152,16 +177,16 @@ class _PrintPlate(QtWidgets.QWidget):
         hero = height - proof_height
         painter.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, not self.incomplete)
         painter.fillRect(rect(0, 0, width, height), GROUND)
-        has_shape = self.record is None or self.record.footprints is not None
-        heading = "接触面" if has_shape else "响应图"
+        imprint = self.face_style == "imprint"
+        heading = "触印" if imprint else "响应"
         _text(painter, rect(margin, 7, width / 2, title + 12), heading, PAPER, title, serif=True)
         if self.record is not None:
-            _text(painter, rect(margin + 3 * title + 7, 8, 120, title + 12),
+            _text(painter, rect(margin + 2 * title + 9, 8, 120, title + 12),
                   self.footprint_label(), QtGui.QColor("#c9c7bc"), 13)
         _text(painter, rect(width / 2, 9, width / 2 - margin, 30),
               "GripTile", PAPER, min(24, title - 8), serif=True, right=True)
         _text(painter, rect(width / 2, 37, width / 2 - margin, 18),
-              "触印 · 20 × 20", QtGui.QColor("#b6b9af"), 12, right=True)
+              "20 × 20", QtGui.QColor("#b6b9af"), 12, right=True)
         if self.record is None:
             painter.setFont(_font(16))
             painter.setPen(QtGui.QColor("#abafa8"))
@@ -172,7 +197,7 @@ class _PrintPlate(QtWidgets.QWidget):
         tile_h = max(24, proof_height - 85)
         gap = max(6, margin // 2)
         tile_w = (width - 2 * margin - 2 * gap) / 3
-        proof_note = "三帧响应" if has_proofs else "等待三帧对照"
+        proof_note = "三帧响应 · 同一色标" if has_proofs else "等待三帧对照"
         if self.incomplete:
             proof_note += " · 灰色为缺测"
         _text(painter, rect(margin, hero + 4, width - 2 * margin, 22), proof_note, INK, 13)
@@ -190,8 +215,11 @@ class _PrintPlate(QtWidgets.QWidget):
                                   bounds.width() / COLS * locator.width(),
                                   bounds.height() / ROWS * locator.height()))
         view_top = max(57, title + 19)
-        view = rect(margin, view_top, width - 2 * margin, hero - view_top - 34)
+        footer = 55 if imprint else 34
+        view = rect(margin, view_top, width - 2 * margin, hero - view_top - footer)
         _draw_exposure(painter, view, self.images[0], bounds)
+        if imprint:
+            _draw_ink_key(painter, margin, width - 2 * margin, hero - 51, has_proofs, self.missing_history)
         _text(painter, rect(margin, hero - 29, width - 2 * margin, 21), self.caption(), PAPER, 12)
         address = (f"行 {bounds.top()}–{bounds.bottom()}　列 {bounds.left()}–{bounds.right()}"
                    if bounds != FULL_ARRAY else "全阵列")
@@ -204,7 +232,8 @@ class _PrintPlate(QtWidgets.QWidget):
             _draw_exposure(painter, tile, image, bounds)
             _text(painter, rect(x, tile_top + tile_h + 1, tile_w, 18),
                   self.proof_labels[i], INK, 12)
-        _draw_response_scale(painter, margin, width - 2 * margin, height - 4, self.record.span_adc)
+        if has_proofs or not imprint:
+            _draw_response_scale(painter, margin, width - 2 * margin, height - 4, self.record.span_adc)
 
     def export_image(self):
         image = QtGui.QImage(1280, 1200, QtGui.QImage.Format_RGB32)
@@ -235,7 +264,7 @@ class ContactPrintDialog(QtWidgets.QDialog):
         self.setStyleSheet("""
             QDialog { background: #ede8d9; }
             QDialog QLabel, QDialog QCheckBox { color: #353e3b; font-size: 13px; }
-            QDialog QPushButton { background: #efece4; color: #22292a; border: 1px solid #969b90;
+            QDialog QPushButton, QDialog QComboBox { background: #efece4; color: #22292a; border: 1px solid #969b90;
                 border-radius: 3px; min-height: 23px; padding: 3px 11px; }
             QPushButton#shutter { background: #26383a; color: #f5f1e5; }
             QDialog QPushButton:disabled, QPushButton#shutter:disabled { color: #777c78; background: #deded4; }
@@ -268,11 +297,18 @@ class ContactPrintDialog(QtWidgets.QDialog):
         self.history_button.setAutoDefault(False)
         info.addWidget(self.history_button)
         info.addWidget(self.status, 1)
+        self.style_combo = QtWidgets.QComboBox(self)
+        self.style_combo.setAccessibleName("主图显示方式")
+        self.style_combo.setToolTip("主图可查看触印纹理或接触响应强度")
+        self.style_combo.addItem("触印", "imprint")
+        self.style_combo.addItem("响应", "response")
+        info.addWidget(self.style_combo)
         layout.addLayout(info)
         self.shutter_button.clicked.connect(self._snapshot)
         self.export_button.clicked.connect(self._export)
         self.history_button.clicked.connect(self.refresh)
         self.zoom.toggled.connect(self._set_zoom)
+        self.style_combo.currentIndexChanged.connect(self.refresh)
 
     def _set_zoom(self, enabled):
         self.plate.zoomed = enabled
@@ -292,18 +328,18 @@ class ContactPrintDialog(QtWidgets.QDialog):
 
     def _update_plate(self, view, target, empty):
         """Render one frame at a time. A result only belongs to its source contact or saved print."""
-        historical = view[0]
+        historical, _, style = view
         if view != self._view:
             self._view, self._error, self._next_preview = view, "", 0.
-            self.plate.clear(empty)
+            self.plate.clear(empty, style)
         elif target is None or (self.plate.record is not None and len(self.plate.record.frames) > len(target.frames)):
-            self.plate.clear(empty)
+            self.plate.clear(empty, style)
         if self._work is not None and self._work[2].done():
             work_view, record, future = self._work
             self._work = None
             if work_view == view and target is not None and len(record.frames) == len(target.frames):
                 try:
-                    self.plate.assign(record, future.result(), historical=historical)
+                    self.plate.assign(record, future.result(), historical=historical, style=style)
                 except (ValueError, RuntimeError) as error:
                     self._error = str(error)
         due = historical or monotonic() >= self._next_preview
@@ -311,7 +347,7 @@ class ContactPrintDialog(QtWidgets.QDialog):
                 and self.plate.record is not target):
             if self._executor is None:
                 self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="griptile-print")
-            self._work = view, target, self._executor.submit(_render_exposures, target)
+            self._work = view, target, self._executor.submit(_render_exposures, target, style)
             self._next_preview = monotonic() + self.PREVIEW_INTERVAL
 
     def refresh(self):
@@ -331,7 +367,10 @@ class ContactPrintDialog(QtWidgets.QDialog):
             empty = "无接触"
         else:
             empty = "正在显示接触面"
-        self._update_plate((historical, capture.latest if historical else capture.contact_id), target, empty)
+        style = self.style_combo.currentData()
+        if target is not None and target.footprints is None:
+            style = "response"
+        self._update_plate((historical, capture.latest if historical else capture.contact_id, style), target, empty)
         self.history_button.setEnabled(capture.latest is not None)
         self.history_button.setText("返回实时" if historical else "上次留印")
         self.shutter_button.setEnabled(not historical and capture.can_snapshot)
