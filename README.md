@@ -159,6 +159,8 @@ ros2 bag play grip_run --clock 100 --delay 1
 
 若录制的传感器名为 `jaw_a`，回放启动命令也要增加 `sensor_id:=jaw_a`。若录制时还单独指定了命名空间，例如 `/robot/jaw`，同时增加 `source_namespace:=/robot/jaw`。
 
+回放节点的 `sensor_id`、`frame_id`、`state_rate_hz`、`max_cell_age_ms` 和 `publish_heatmap` 在启动时生效，运行中写入会返回只读提示。要更改这些设置，只需用新参数重新启动回放节点。
+
 ## 验证与维护
 
 ```bash

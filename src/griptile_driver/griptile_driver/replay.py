@@ -4,6 +4,7 @@ from collections import deque
 import math
 
 import rclpy
+from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.clock import Clock, ClockType
 from rclpy.event_handler import PublisherEventCallbacks
 from rclpy.executors import ExternalShutdownException
@@ -22,9 +23,10 @@ from .ros_messages import batch_from_message, heatmap_message, state_message
 class TactileReplayNode(Node):
     def __init__(self, **kwargs):
         super().__init__("griptile_replay", **kwargs)
-        self.declare_parameters("", [("sensor_id", "sensor_0"), ("frame_id", ""),
-                                     ("state_rate_hz", 30.0), ("max_cell_age_ms", 100.0),
-                                     ("publish_heatmap", False)])
+        for name, default in (("sensor_id", "sensor_0"), ("frame_id", ""),
+                              ("state_rate_hz", 30.0), ("max_cell_age_ms", 100.0),
+                              ("publish_heatmap", False)):
+            self.declare_parameter(name, default, ParameterDescriptor(read_only=True))
         self.sensor_id = validate_sensor_id(self.get_parameter("sensor_id").value)
         self.frame_id = self.get_parameter("frame_id").value
         rate = self.get_parameter("state_rate_hz").value

@@ -89,6 +89,32 @@ def test_latched_info_reflects_actual_connection(context):
         node.destroy_node()
 
 
+def test_replay_configuration_matches_started_publishers_and_rejects_live_edits(context):
+    settings = dict(sensor_id="pad_a", frame_id="left_jaw", state_rate_hz=20.0,
+                    max_cell_age_ms=250.0, publish_heatmap=True)
+    replay = TactileReplayNode(context=context, parameter_overrides=[
+        Parameter(name, value=value) for name, value in settings.items()])
+    try:
+        assert replay.sensor_id == "pad_a" and replay.frame_id == "left_jaw"
+        assert replay.timer.timer_period_ns == 50_000_000
+        assert replay.max_age_ns == 250_000_000
+        assert replay.heatmap_publisher is not None
+        edits = dict(sensor_id="pad_b", frame_id="right_jaw", state_rate_hz=50.0,
+                     max_cell_age_ms=500.0, publish_heatmap=False)
+        for name, value in edits.items():
+            assert replay.describe_parameter(name).read_only
+            result, = replay.set_parameters([Parameter(name, value=value)])
+            assert not result.successful and result.reason
+            assert replay.get_parameter(name).value == settings[name]
+        replay.state_publisher = states = Collector()
+        replay.heatmap_publisher = images = Collector()
+        replay.on_samples(sample_message(measurement(), "recorded_frame"))
+        replay.publish_state()
+        assert states.messages[-1].header.frame_id == images.messages[-1].header.frame_id == "left_jaw"
+    finally:
+        replay.destroy_node()
+
+
 def test_recorded_source_time_controls_replay_expiry_and_seek(context):
     node = TactileReplayNode(context=context, parameter_overrides=[
         Parameter("use_sim_time", value=True), Parameter("sensor_id", value="pad_a")])

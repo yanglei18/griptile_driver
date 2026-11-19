@@ -19,6 +19,8 @@ def generate_launch_description():
         DeclareLaunchArgument("sensor_id", default_value="sensor_0"),
         DeclareLaunchArgument("source_namespace", default_value=["/tactile/", sensor_id]),
         DeclareLaunchArgument("namespace", default_value="/tactile/replay"),
+        DeclareLaunchArgument("frame_id", default_value="", description="Override the recorded frame ID"),
+        DeclareLaunchArgument("publish_heatmap", default_value="false"),
         DeclareLaunchArgument("max_cell_age_ms", default_value="100.0"),
         DeclareLaunchArgument("state_rate_hz", default_value="30.0"),
         Node(package="griptile_driver", executable="griptile_replay", namespace=output,
@@ -28,6 +30,8 @@ def generate_launch_description():
              parameters=[{
                  **identity,
                  **contact_launch.parameters(),
+                 "frame_id": ParameterValue(LaunchConfiguration("frame_id"), value_type=str),
+                 "publish_heatmap": ParameterValue(LaunchConfiguration("publish_heatmap"), value_type=bool),
                  "max_cell_age_ms": ParameterValue(LaunchConfiguration("max_cell_age_ms"), value_type=float),
                  "state_rate_hz": ParameterValue(LaunchConfiguration("state_rate_hz"), value_type=float),
              }]),
