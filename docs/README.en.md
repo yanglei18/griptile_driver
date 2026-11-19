@@ -49,6 +49,16 @@ The three RGB channels encode one tactile response per taxel. The same response 
 ros2 service call /tactile/sensor_0/set_contact_reference griptile_msgs/srv/SetContactReference '{}'
 ```
 
+### Read contact changes in a single print
+
+Click **触印** beside the GripTile name. The main print registers three response maps in the same coordinates. Copper highlights contours that emerge later, cyan highlights receding contours, and overlapping contours approach ivory. The three monochrome panels below show the individual exposures from oldest to newest, roughly 300 ms apart. Brighter regions have a stronger response above the unloaded reference. Each panel uses the same scale and crop. Clear **放大接触区** to locate the patch on the full array.
+
+Use the existing unloaded reference. After about 0.6 seconds of continuous readings, **拍下当前** takes a manual print. Strong contact arms automatic capture. The same taxels stay active as the load lightens. Once they all fall below their lower release threshold for 0.3 seconds, the viewer selects a print from the decline, even with the print window closed. Use the manual shutter for light touches. Missing measurements appear gray. Data gaps interrupt capture. **导出触印** saves the latest composition, exposures and legend as a PNG.
+
+The live viewer matches the native 20×20 scalar response to its source state and labels prints made with active taxel equalization. Standard bag replay reconstructs the scalar response from samples and the recorded reference. Interpolated contours visualize the footprint between measured points. The ROS `state` and `contact_response` topics supply native data for quantitative analysis and CV.
+
+![Synthetic example of a ring unloading on one side, with three measured-grid views below the composite](contact-print.png)
+
 ### Match taxel colors under equal local pressure
 
 Open **阵元标定** in the live viewer and reuse the ready unloaded reference. Cover the entire 20×20 array with a uniform-pressure bladder or a fixture with independently established pressure uniformity. Keep the mounting and contact surface fixed. A cap rim, finger or total force reading alone cannot establish equal local pressure.
@@ -59,7 +69,7 @@ Open **阵元标定** in the live viewer and reuse the ready unloaded reference.
 
 No pressure values need to be entered. The corrected spatial coefficient of variation (standard deviation divided by mean) must be at most 10% and each corrected taxel must be within 20% of the median. The dialog identifies weak, saturated or unstable cells and allows retrying the check independently. A consistently uneven fixture can reproduce the same pressure pattern at both levels and bias the calibration.
 
-The factors adjust colors in both live contact views and the main peak indicator around the validated range. Raw ADC, ROS response and RGB topics, PNG exports and the force-gauge workflow retain the original scale. The viewer labels PNG exports **导出未均衡图** while correction is active. [Two-level validation on a simulated array](taxel-calibration.png)
+The factors adjust colors in both live contact views and the main peak indicator around the validated range. Raw ADC, ROS response and RGB topics, PNGs exported from the main viewer's details panel and the force-gauge workflow retain the original scale. The details panel labels its PNG export **导出未均衡图** while correction is active. [Two-level validation on a simulated array](taxel-calibration.png)
 
 ### Check the display against a known load
 

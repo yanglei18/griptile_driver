@@ -2,6 +2,8 @@
 
 ## 0.1.0 candidate
 
+- Add a contact-print window for live and replay data with three source-timed exposures, manual capture, automatic release prints, and a labeled PNG export.
+
 - Extract the 44-byte, 20-column sensor protocol, serial ownership and rolling ADC grid into a standalone package.
 - Introduce sensor-scoped ROS 2 interfaces for raw rows, state, diagnostics and source metadata.
 - Add a matrix viewer, neutral reference capture, a simulated sensor and sample-based replay.

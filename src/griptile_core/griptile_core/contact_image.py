@@ -9,6 +9,8 @@ DEFAULT_CONTACT_SPAN = 3000.0  # Noise-gated ADC counts at full red.
 INVALID_RGB = (128, 128, 128)
 UNLOADED_RGB = (224, 233, 239)
 CONTACT_OUTLINE_RGB = (58, 83, 97)
+CONTACT_SEED_RATIO = 8.0       # Strong response, in multiples of each taxel's noise threshold.
+CONTACT_SUPPORT_RATIO = 2.0    # Lower threshold for continuing a previously supported contact.
 # The first active color is one red-channel code below unloaded. Even a
 # sub-quantization response retains its contact flag in an RGB-only image.
 CONTACT_COLOR_STOPS = (
@@ -143,8 +145,8 @@ def contact_surface_rgb(amplitude, span) -> np.ndarray:
 
 def _connected_contact_mask(amplitude, thresholds, valid):
     """Retain weak taxels reachable from a strong taxel through shared sides."""
-    weak = valid & (amplitude >= 2 * thresholds)
-    region = valid & (amplitude >= 8 * thresholds)
+    weak = valid & (amplitude >= CONTACT_SUPPORT_RATIO * thresholds)
+    region = valid & (amplitude >= CONTACT_SEED_RATIO * thresholds)
     while region.any():
         expanded = region.copy()
         expanded[1:] |= region[:-1]

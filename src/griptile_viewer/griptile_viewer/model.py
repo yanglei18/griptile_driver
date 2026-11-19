@@ -12,6 +12,7 @@ from griptile_core.identity import validate_sensor_id
 from griptile_core.protocol import PROTOCOL_ID
 
 from .load_capture import LoadContext, LoadObservation
+from .print_capture import ContactPrintCapture
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,8 @@ class ArrayView:
         self._states = deque(maxlen=4)
         self._images = deque(maxlen=4)
         self._responses = deque(maxlen=4)
+        self.contact_prints = ContactPrintCapture()
+        self._reset_prints()
         self._has_measured_response = False
         self._load_reference = None
         self._load_revision = 0
@@ -51,6 +54,7 @@ class ArrayView:
         self.rejection = ""
 
     def reset_stream(self):
+        self._reset_prints()
         self._states.clear()
         self._images.clear()
         self._responses.clear()
@@ -58,6 +62,12 @@ class ArrayView:
         self.trend.clear()
         self.message = None
         self.identity = None
+
+    def _reset_prints(self):
+        self.contact_prints.reset()
+        self._print_context = self._print_profile = None
+        self._print_stamp = self._print_received = None
+        self._print_rows = np.zeros(ROWS, dtype=np.int64)
 
     def track_clock(self, clock_ns):
         """ROS time may rewind on a bag seek. Discard the previous playback position."""
@@ -241,6 +251,49 @@ class ArrayView:
         thresholds = np.asarray(self.reference.activation_threshold_adc).reshape(SHAPE)
         return amplitude, np.where(rows[:, None] & np.isfinite(amplitude), thresholds, np.nan)
 
+    def update_contact_print(self, clock_ns, profile=None):
+        """Feed each new measured scan once, independent of Qt refresh or DDS arrival order."""
+        if self.message is not None and (not self.message.connected or not self.message.time_valid):
+            # The stream ended. Its finished print is still available for export.
+            # accept() interrupted the shutter; a new stream or reference resets it.
+            return
+        context = self.load_context
+        if context is not self._print_context or profile is not self._print_profile:
+            self._reset_prints()
+            self._print_context, self._print_profile = context, profile
+        if context is None or not self._responses:
+            return
+        source = dict(self._responses)
+        reference = self.reference
+        valid_now = self.mask(clock_ns) & np.asarray(reference.valid_mask).reshape(SHAPE)
+        thresholds = np.asarray(reference.activation_threshold_adc).reshape(SHAPE)
+        for key, state, received in self._states:
+            stamp = int(key[1]) * 1_000_000_000 + int(key[2])
+            if key not in source or (self._print_stamp is not None and stamp <= self._print_stamp):
+                continue
+            if not any(state.valid_mask):
+                # This observed scan was already empty at acquisition. A later
+                # quiet scan cannot turn its missing measurements into a release.
+                self.contact_prints.interrupt()
+                self._print_stamp, self._print_received = stamp, None
+                continue
+            valid = valid_now & self._mask_at(state, received, clock_ns)
+            valid &= self._rows_after_reference(state, context)[:, None]
+            valid_rows = valid.any(axis=1)
+            rows = np.asarray(state.row_monotonic_ns)
+            # A rolling state can publish the same physical row repeatedly.
+            # Wait until every participating row has a new observation.
+            if not valid_rows.any() or (rows[valid_rows] <= self._print_rows[valid_rows]).any():
+                continue
+            self.contact_prints.observe(stamp, np.where(valid, source[key], np.nan), thresholds, profile)
+            self._print_rows[valid_rows] = rows[valid_rows]
+            self._print_stamp, self._print_received = stamp, received
+        # A delayed draw may still have a continuous queue of fresh source frames.
+        # Only expire the shutter after draining the matched observations.
+        if self._print_received is not None and clock_ns - self._print_received > self.message.max_age_ns:
+            self.contact_prints.interrupt()
+            self._print_received = None
+
     def accept(self, message, clock_ns):
         if message.sensor_id != self.sensor_id:
             self.rejection = "传感器名称不匹配"
@@ -272,6 +325,7 @@ class ArrayView:
         self.message = message
         self.receive_clock = clock_ns
         if not message.connected or not message.time_valid:
+            self.contact_prints.interrupt()
             if not message.connected:
                 self._load_reference = None
             self._states.clear()

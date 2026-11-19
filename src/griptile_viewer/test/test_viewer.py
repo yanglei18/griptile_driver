@@ -237,6 +237,135 @@ def response(state, amplitude, *, bigendian=False):
                            is_bigendian=bigendian, data=data)
 
 
+@pytest.mark.parametrize("replay", [False, True])
+def test_window_collects_contact_print_before_open_and_separates_references(open_window, replay):
+    model = ArrayView(SENSOR, replay=replay)
+    assembler = Assembler(sensor_id=SENSOR)
+    first = snapshot(assembler, 1, START)
+    reference = profile_status()
+    reference.header, reference.direction = first.header, "both"
+    model.accept_reference(reference)
+    model.accept(first, 0)
+    now = 0
+    window = open_window(model, clock_ns=lambda: now)
+    for i in range(1, 16):
+        now = i * 50_000_000
+        state = snapshot(assembler, i + 1, START + now)
+        scalar = response(state, np.full((20, 20), i))
+        if i % 2:
+            model.accept_response(scalar)
+        model.accept(state, now)
+        if not i % 2:
+            window.refresh()
+            model.accept_response(scalar)
+        window.refresh()
+    assert window.contact_print_dialog is None
+    window.contact_print_button.click()
+    dialog = window.contact_print_dialog
+    assert dialog.isVisible() and dialog.shutter_button.isEnabled()
+    dialog.shutter_button.click()
+    saved = model.contact_prints.latest
+    assert not saved.automatic
+    assert saved.stamps_ns == tuple(START + 10**12 + i * 50_000_000 for i in (3, 9, 15))
+    assert [frame[0, 0] for frame in saved.frames] == [3, 9, 15]
+    # An old scalar cannot continue producing exposures when only the state topic is alive.
+    now += 110_000_000
+    state = snapshot(assembler, 17, START + now)
+    model.accept(state, now)
+    window.refresh()
+    assert model.contact_prints.latest is saved and not dialog.shutter_button.isEnabled()
+    assert window.contact_print_button.text() == "查看触印"
+    if replay:
+        now = 0
+    else:
+        now += 10_000_000
+        ended = snapshot(assembler, 18, START + now)
+        ended.connected = False
+        model.accept(ended, now)
+        window.refresh()
+        assert model.contact_prints.latest is saved and not model.contact_prints.can_snapshot
+        now += 10_000_000
+        state = snapshot(assembler, 19, START + now)
+        model.accept(state, now)
+        reference.header = state.header
+        model.accept_reference(reference)
+    window.refresh()
+    assert model.contact_prints.latest is None
+    assert not dialog.export_button.isEnabled()
+
+
+def test_contact_print_requires_new_rows_and_native_scalar():
+    model = ArrayView(SENSOR)
+    assembler = Assembler(sensor_id=SENSOR)
+    first = snapshot(assembler, 1, START)
+    ref = profile_status()
+    ref.header, ref.direction = first.header, "both"
+    model.accept_reference(ref)
+    model.accept(first, 0)
+    field = np.full((20, 20), 40)
+    rgb = np.full((20, 20, 3), 220, np.uint8)
+    for i in range(1, 24):
+        now = i * 40_000_000
+        state = snapshot(assembler, i + 1, START + now)
+        model.accept(state, now)
+        model.accept_image(image(state, rgb))
+        model.update_contact_print(now)
+    assert model.contact_prints.snapshot() is None
+    # State timestamps advance, but only the first row is physically scanned again.
+    for j in range(24):
+        now += 40_000_000
+        state = snapshot(assembler, j + 25, START + now, rows=(0,) if j else range(20),
+                         first_packet_index=480 if not j else 499 + j)
+        model.accept(state, now)
+        model.accept_response(response(state, field))
+        model.update_contact_print(now)
+    partial = model.contact_prints.snapshot()
+    assert partial and np.isfinite(partial.frames[-1][0]).all()
+    assert not np.isfinite(partial.frames[-1][1:]).any()
+    assert not partial.automatic
+
+
+def test_delayed_viewer_draw_consumes_fresh_queued_print_frames_before_expiring():
+    model = ArrayView(SENSOR)
+    assembler = Assembler(sensor_id=SENSOR)
+    first = snapshot(assembler, 1, START)
+    ref = profile_status()
+    ref.header, ref.direction = first.header, "both"
+    model.accept_reference(ref)
+    model.accept(first, 0)
+    for i in range(1, 20):
+        now = i * 40_000_000
+        state = snapshot(assembler, i + 1, START + now)
+        model.accept(state, now)
+        model.accept_response(response(state, np.full((20, 20), i)))
+        if i not in (11, 12):
+            model.update_contact_print(now)
+    # The draw after 400 ms happened at 520 ms; all three source samples were still fresh.
+    printout = model.contact_prints.snapshot()
+    assert printout is not None
+    assert printout.frames[0][0, 0] == 4 and printout.frames[-1][0, 0] == 19
+
+
+def test_empty_source_scan_between_press_and_release_breaks_capture():
+    model = ArrayView(SENSOR)
+    assembler = Assembler(sensor_id=SENSOR)
+    first = snapshot(assembler, 1, START)
+    reference = profile_status()
+    reference.header, reference.direction = first.header, "both"
+    model.accept_reference(reference)
+    model.accept(first, 0)
+    for i in range(1, 40):
+        now = i * 40_000_000
+        state = snapshot(assembler, i + 1, START + now)
+        if i == 22:
+            state.valid_mask = [False] * 400
+        model.accept(state, now)
+        model.accept_response(response(state, np.full((20, 20), 900 if i < 22 else 0)))
+        model.update_contact_print(now)
+    assert model.contact_prints.can_snapshot
+    assert model.contact_prints.latest is None
+
+
 def test_contour_is_a_display_layer_bound_to_the_measured_reference(open_window, tmp_path):
     from griptile_viewer.window import CONTACT_MODE, RAW_MODE, SURFACE_MODE, QtGui
 
