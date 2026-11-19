@@ -40,6 +40,9 @@ class Collector:
     def publish(self, message):
         self.messages.append(message)
 
+    def wait_for_all_acked(self, timeout):
+        return True
+
 
 def measurement():
     return Batch(
@@ -62,6 +65,9 @@ def test_latched_info_reflects_actual_connection(context):
         class Source:
             def identity_for_epoch(self, epoch):
                 return "usb:fixture" if epoch == 1 else ""
+
+            def drain(self, limit):
+                return []
 
             def stop(self, timeout):
                 return True

@@ -1,8 +1,9 @@
 """A bounded, read-only serial producer, independent of ROS and any UI.
 
-One worker thread owns the serial object for its entire lifetime. The queue
-discards the oldest batch when full so health events cannot sit behind an
-unbounded backlog. ``producer_dropped_total`` counts discarded *batches*, while
+One worker owns serial reads, framing and close. A stop request may cancel a
+pending read from another thread. During acquisition the queue discards the
+oldest batch when full. At shutdown it also holds the finite final read and
+terminal event. ``producer_dropped_total`` counts discarded *batches*, while
 ``first_packet_index`` counts all decoded packets, including dropped batches.
 
 On Linux, ownership checks inspect accessible /proc file descriptors before
@@ -14,12 +15,14 @@ On Windows, pyserial opens the COM device with Win32 exclusive ownership;
 POSIX descriptor checks and ioctls are neither needed nor available.
 """
 
+from collections import deque
 from dataclasses import dataclass, replace
 from itertools import groupby
 import math
 from pathlib import Path
 import queue
 import threading
+import time
 import uuid
 from typing import Callable, Optional
 from numbers import Integral
@@ -112,7 +115,11 @@ class SerialWorker:
         self.auto_reconnect = auto_reconnect and Path(port).parent == Path("/dev/serial/by-id")
         self.session_id = str(uuid.uuid4())
         self._factory = serial_factory
-        self._queue = queue.Queue(maxsize=queue_capacity)
+        self._queue = deque()
+        self._queue_capacity = queue_capacity
+        self._queue_lock = threading.Lock()
+        self._device_lock = threading.Lock()
+        self._device = None
         self._stop = threading.Event()
         self._thread = None
         self._parser = StreamParser()
@@ -157,23 +164,36 @@ class SerialWorker:
         if not math.isfinite(timeout) or timeout < 0:
             raise ValueError("stop timeout must be finite and nonnegative")
         self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout)
+        deadline = time.monotonic() + timeout
+        while self.running:
+            # pyserial provides cancel_read specifically for cross-thread shutdown.
+            # Retry in case cancellation arrived just before a Windows read started.
+            with self._device_lock:
+                cancel = getattr(self._device, "cancel_read", None)
+                if cancel is not None:
+                    try:
+                        cancel()
+                    except (OSError, ValueError):
+                        pass
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            self._thread.join(min(.05, remaining))
         return not self.running
 
     def get_nowait(self) -> Batch:
-        return self._queue.get_nowait()
+        with self._queue_lock:
+            if not self._queue:
+                raise queue.Empty
+            return self._queue.popleft()
 
-    def drain(self, limit: int = 128) -> list[Batch]:
-        if limit < 0:
+    def drain(self, limit: int | None = 128) -> list[Batch]:
+        """Take a bounded snapshot of queued batches. None takes the current backlog."""
+        if limit is not None and limit < 0:
             raise ValueError("drain limit must be nonnegative")
-        batches = []
-        for _ in range(limit):
-            try:
-                batches.append(self.get_nowait())
-            except queue.Empty:
-                break
-        return batches
+        with self._queue_lock:
+            count = len(self._queue) if limit is None else min(limit, len(self._queue))
+            return [self._queue.popleft() for _ in range(count)]
 
     def _clock(self) -> tuple[int, int, bool]:
         # These calls occur immediately after read() returns, never at publish.
@@ -217,19 +237,23 @@ class SerialWorker:
         self._sequence += 1
         self._packet_index += len(blocks)
         self._connected = connected
-        try:
-            self._queue.put_nowait(batch)
-        except queue.Full:
-            # Single producer. The consumer may empty the queue between these
-            # operations, so only count a drop when an item was really removed.
-            try:
-                self._queue.get_nowait()
-            except queue.Empty:
-                pass
-            else:
+        with self._queue_lock:
+            # When stopping, at most the bounded parser buffer, one in-flight
+            # read and the terminal event remain. None may evict accepted rows.
+            if (len(self._queue) >= self._queue_capacity and not self._stop.is_set()
+                    and reason != "stopped"):
+                self._queue.popleft()
                 self._producer_dropped_total += 1
-            self._queue.put_nowait(replace(
-                batch, producer_dropped_total=self._producer_dropped_total))
+                batch = replace(batch, producer_dropped_total=self._producer_dropped_total)
+            self._queue.append(batch)
+
+    def _emit_decoded(self, decoded):
+        last_read_ns = None
+        for read_clocks, group in groupby(decoded, key=lambda entry: entry[1]):
+            blocks = tuple(block for block, _tag in group)
+            self._emit(connected=True, reason="ok", blocks=blocks, clocks=read_clocks)
+            last_read_ns = read_clocks[1]
+        return last_read_ns
 
     def _open_serial(self):
         if self._factory is not None:
@@ -253,6 +277,8 @@ class SerialWorker:
                 device = None
                 try:
                     device = self._open_serial()
+                    with self._device_lock:
+                        self._device = device
                     identity = usb_identity(device)
                     if self._stream_epoch and identity != self.device_identity:
                         self._emit(connected=False, reason="device_identity_changed")
@@ -272,7 +298,7 @@ class SerialWorker:
                         count = min(MAX_READ_BYTES, max(self.read_batch_bytes, int(device.in_waiting)))
                         data = device.read(count)
                         clocks = self._clock()
-                        if self._stop.is_set():
+                        if self._stop.is_set() and not data:
                             break
                         if data:
                             last_byte_ns = clocks[1]
@@ -286,14 +312,11 @@ class SerialWorker:
                             self._pending_clock_fault = ""
                             continue
                         decoded = self._parser.feed(data, clocks)
-                        received_packets = bool(decoded)
-                        for read_clocks, group in groupby(decoded, key=lambda entry: entry[1]):
-                            blocks = tuple(block for block, _tag in group)
-                            last_packet_ns = read_clocks[1]
+                        read_ns = self._emit_decoded(decoded)
+                        if read_ns is not None:
+                            last_packet_ns = read_ns
                             timeout_reported = False
-                            self._emit(connected=True, reason="ok", blocks=blocks,
-                                       clocks=read_clocks)
-                        if (not received_packets and not timeout_reported
+                        elif (not timeout_reported and not self._stop.is_set()
                               and clocks[1] - last_packet_ns >= self.no_data_timeout * 1e9):
                             reason = ("no_data_timeout" if clocks[1] - last_byte_ns
                                       >= self.no_data_timeout * 1e9 else "no_valid_packets")
@@ -303,15 +326,19 @@ class SerialWorker:
                             self._emit(connected=True, reason=reason, clocks=clocks)
                             timeout_reported = True
                 except Exception as exc:
-                    self._parser.reset()
-                    self._emit(connected=False, reason=f"serial_error: {type(exc).__name__}: {exc}")
+                    if not self._stop.is_set():
+                        self._parser.reset()
+                        self._emit(connected=False, reason=f"serial_error: {type(exc).__name__}: {exc}")
                 finally:
                     if device is not None:
+                        with self._device_lock:
+                            self._device = None
                         self._close_serial(device)
                 if not self.auto_reconnect or (self._stream_epoch and not self.device_identity):
                     break
                 if not self._stop.is_set():
                     self._stop.wait(self.reconnect_interval_sec)
         finally:
+            self._emit_decoded(self._parser.drain_confirmed())
             self._parser.reset()
             self._emit(connected=False, reason="stopped")

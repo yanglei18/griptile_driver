@@ -177,6 +177,12 @@ class StreamParser:
         self._admitted.clear()
         self.confirmed = False
 
+    def drain_confirmed(self):
+        """At shutdown, release proven packets before reset accounts for the unconfirmed suffix."""
+        confirmed = tuple(self._admitted)
+        self._admitted.clear()
+        return confirmed
+
     def _consume(self, count):
         del self._buffer[:count]
         tag = None

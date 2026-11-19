@@ -6,18 +6,22 @@ and optional RGB heatmap retain the acquisition timestamp of their source.
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 from importlib.metadata import version
 import math
 from numbers import Integral
+import signal
 import time
 import uuid
 
 import rclpy
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from rcl_interfaces.msg import SetParametersResult
-from rclpy.executors import ExternalShutdownException
+from rclpy.duration import Duration
+from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.signals import SignalHandlerOptions
 from sensor_msgs.msg import Image
 from griptile_msgs.msg import SensorInfo, TactileRow44Array, TactileGridState
 from griptile_msgs.srv import ManageSerial
@@ -30,7 +34,6 @@ from griptile_core.serial_ports import available_ports, validate_port
 from griptile_core.serial_source import Batch, CLOCK_DOMAIN, MAX_READ_BYTES, SerialWorker, TIMING_SOURCE
 
 from .contact import ContactImaging
-from .lifecycle import shutdown_ros
 from .ros_messages import heatmap_message, sample_message, state_message
 
 
@@ -75,7 +78,7 @@ class TactileNode(Node):
         self.assembler = Assembler(sensor_id=self.config["sensor_id"])
         self._last_batch = None
         self._last_snapshot = None
-        self._source_stopped = False
+        self._closing = False
         self._last_diagnostic_summary = None
         self._rate_window_start_ns = self._monotonic_ns()
         self._rate_window_batches = 0
@@ -140,17 +143,22 @@ class TactileNode(Node):
             return "connected"
         return "error" if self._serial_error else "opening"
 
+    def _stop_source(self):
+        """Stop the writer before draining its finite backlog, including its final event."""
+        if self.source is None:
+            return True
+        stopped = self.source.stop(timeout=1.0)
+        if self.context.ok():
+            self.drain_samples(limit=None)
+        return stopped
+
     def _replace_serial(self, port, baudrate):
         if (port, baudrate) == (self._port, self._baudrate):
             if self._serial_state() != "error" and self._serial_error not in _DATA_TIMEOUTS:
                 return
         next_source = self._make_source(port, baudrate) if port else None
-        if self.source is not None:
-            if not self.source.stop(timeout=1):
-                raise ValueError("正在释放原串口，请稍后刷新并重试")
-            # Publish every remaining archival batch, including the worker's
-            # terminal event, before retiring this source and its row clock.
-            self.drain_samples(self.config["queue_capacity"])
+        if not self._stop_source():
+            raise ValueError("正在释放原串口，请稍后刷新并重试")
 
         self._port, self._baudrate = port, baudrate
         self.source = next_source
@@ -312,20 +320,52 @@ class TactileNode(Node):
             self._last_diagnostic_summary = summary
 
     def destroy_node(self):
-        if not self._source_stopped:
-            self._source_stopped = True
-            if self.source is not None and not self.source.stop(timeout=1.0):
+        if self._closing:
+            return
+        self._closing = True
+        try:
+            if not self._stop_source():
                 self.get_logger().error("Tactile serial worker did not stop within 1 second.")
-        return super().destroy_node()
+            if self.context.ok():
+                # The recorder subscribes reliably to these three streams. All
+                # acknowledgements share one deadline before destroying the writers.
+                deadline = time.monotonic() + 1.0
+                for name, publisher in (("samples", self.sample_publisher), ("info", self.info_publisher),
+                                        ("contact_reference", self.contact.reference_publisher)):
+                    remaining = max(0., deadline - time.monotonic())
+                    if not publisher.wait_for_all_acked(Duration(seconds=remaining)):
+                        self.get_logger().warning(f"Timed out waiting for {name} acknowledgements.")
+        except RuntimeError:
+            # A host application can shut down its context independently. Once
+            # it has done so, stop the serial worker and release resources only.
+            if self.context.ok():
+                raise
+        finally:
+            super().destroy_node()
 
 
 def main(args=None):
-    rclpy.init(args=args)
-    node = None
-    try:
+    stopping = False
+
+    def request_stop(signum, frame):
+        nonlocal stopping
+        stopping = True
+
+    # Let the current callback finish and keep DDS valid through the final
+    # publish. A second launch/terminal signal only repeats the request.
+    with ExitStack() as cleanup:
+        for number in (signal.SIGINT, signal.SIGTERM):
+            previous = signal.signal(number, request_stop)
+            cleanup.callback(signal.signal, number, previous)
+        rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
+        cleanup.callback(rclpy.try_shutdown)
         node = TactileNode()
-        rclpy.spin(node)
-    except (KeyboardInterrupt, ExternalShutdownException):
-        pass
-    finally:
-        shutdown_ros(node)
+        cleanup.callback(node.destroy_node)
+        executor = SingleThreadedExecutor(context=node.context)
+        cleanup.callback(executor.shutdown)
+        executor.add_node(node)
+        try:
+            while not stopping and node.context.ok():
+                executor.spin_once(timeout_sec=.1)
+        except ExternalShutdownException:
+            pass
