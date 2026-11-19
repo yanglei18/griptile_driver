@@ -331,7 +331,7 @@ class LoadDialog(QtWidgets.QDialog):
             fresh_count = int(model.mask(self.viewer.clock_ns()).sum())
             live = f"新鲜测点 {fresh_count}/{CELL_COUNT}，等候完整、与参考配对的触觉响应。"
         else:
-            live = f"接触 {obs.active_cells} 点　峰值 {obs.peak_adc:g} ADC"
+            live = f"有响应 {obs.active_cells} 点　峰值 {obs.peak_adc:g} ADC"
             if obs.peak_adc >= context.span_adc:
                 live += "（色标已满）"
             live += f"\n响应总和 {obs.total_adc:g} ADC　有符号总和 {obs.signed_total_adc:+g} ADC"

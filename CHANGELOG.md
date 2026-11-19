@@ -3,6 +3,7 @@
 ## 0.1.0 candidate
 
 - Add a contact-print window for live and replay data with three source-timed exposures, manual capture, automatic release prints, and a labeled PNG export.
+- Clear the live print at the first observed release and offer completed prints in a separate history view. Disable manual capture on an unloaded or indeterminate array.
 
 - Extract the 44-byte, 20-column sensor protocol, serial ownership and rolling ADC grid into a standalone package.
 - Introduce sensor-scoped ROS 2 interfaces for raw rows, state, diagnostics and source metadata.

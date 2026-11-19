@@ -13,11 +13,25 @@ class _Capture:
     def __init__(self):
         self.can_snapshot = False
         self.latest = None
-        self.next_manual = None
+        self.live = None
+        self.contact_present = None
+        self.contact_id = None
+
+    def press(self, record):
+        self.live = record
+        self.contact_present = self.can_snapshot = True
+        self.contact_id = object()
+
+    def release(self):
+        self.live = self.contact_id = None
+        self.contact_present = self.can_snapshot = False
+
+    def preview(self):
+        return self.live
 
     def snapshot(self):
         if self.can_snapshot:
-            self.latest = self.next_manual
+            self.latest = self.live
             return self.latest
 
 
@@ -58,16 +72,22 @@ def test_manual_capture_actual_timing_shared_crop_resize_and_export(display, qt_
     window, capture = display
     assert not window.isModal()
     assert not window.shutter_button.isEnabled()
+    assert not window.history_button.isEnabled() and window.plate.empty_text == "等待有效读数"
     assert not window.export_button.isEnabled()
     with pytest.raises(ValueError):
         window.save_png(tmp_path / "empty.png")
 
-    capture.next_manual = record = _sample()
-    capture.can_snapshot = True
+    record = _sample()
+    capture.press(record)
     window.refresh()
     window.shutter_button.click()
     _settle(window, record, qt_app)
     assert window.plate.proof_labels == ("600 毫秒前", "299 毫秒前", "此刻")
+    assert window.plate.caption() == "实时接触" and not window.export_button.isEnabled()
+    assert not window.history_button.isChecked()
+    window.history_button.click()
+    _settle(window, record, qt_app)
+    assert window.plate.proof_labels[-1] == "取印时" and window.plate.historical
     assert "299 毫秒前" in window.plate.accessibleDescription()
     assert window.plate.bounds == QtCore.QRect(0, 5, 8, 8)
     assert window.export_button.isEnabled() and window.zoom.isEnabled()
@@ -85,6 +105,9 @@ def test_manual_capture_actual_timing_shared_crop_resize_and_export(display, qt_
     assert loaded.pixelColor(2, 1198) == ui.PAPER
     assert loaded.convertToFormat(cropped.format()) != cropped
     assert window.plate.record is record
+    capture.release()
+    window.history_button.click()
+    assert window.plate.record is None and not window.plate.images and window.plate.empty_text == "无接触"
 
 
 def test_stale_render_cannot_replace_new_stream_and_unchanged_print_is_cached(
@@ -103,21 +126,25 @@ def test_stale_render_cannot_replace_new_stream_and_unchanged_print_is_cached(
 
     monkeypatch.setattr(ui, "render_contact_print", slow)
     try:
-        capture.latest = first
+        capture.press(first)
         window.refresh()
-        capture.latest = None
+        capture.release()
         window.refresh()
         capture.latest = second
         window.refresh()
-        assert window.plate.record is None
+        assert window.plate.record is None and not window.plate.images and window.plate.empty_text == "无接触"
         assert not window.export_button.isEnabled()
+        assert not window.shutter_button.isEnabled() and not window.history_button.isChecked()
     finally:
         release.set()
+    _settle(window, None, qt_app)
+    assert window.plate.empty_text == "无接触"
+    window.history_button.click()
     _settle(window, second, qt_app)
     for _ in range(5):
         window.refresh()
     assert jobs == [id(first.frames), id(second.frames)]
-    assert "自动留印" in window.plate.caption()
+    assert window.plate.caption() == "历史留印 · 自动留印"
     capture.latest = None
     window.refresh()
     assert not window.export_button.isEnabled()
@@ -127,6 +154,8 @@ def test_stale_render_cannot_replace_new_stream_and_unchanged_print_is_cached(
 def test_export_preserves_print_displayed_when_file_picker_opened(display, qt_app, tmp_path, monkeypatch):
     window, capture = display
     capture.latest = _sample()
+    window.refresh()
+    window.history_button.click()
     _settle(window, capture.latest, qt_app)
     before = window.plate.export_image()
     path = tmp_path / "pinned.png"
@@ -141,3 +170,51 @@ def test_export_preserves_print_displayed_when_file_picker_opened(display, qt_ap
     after = QtGui.QImage(str(path)).convertToFormat(before.format())
     assert after == before
     assert after != window.plate.export_image()
+
+
+def test_live_preview_advances_and_reopen_defaults_to_current_contact(display, qt_app):
+    window, capture = display
+    first = _sample()
+    capture.press(first)
+    _settle(window, first, qt_app)
+    second = _sample()
+    capture.live = second
+    _settle(window, second, qt_app)
+    assert window.plate.caption() == "实时接触"
+    capture.latest = first
+    capture.release()
+    window.refresh()
+    assert not window.plate.images and not window.plate.proof_labels
+    window.history_button.click()
+    _settle(window, first, qt_app)
+    window.close()
+    window.show()
+    assert not window.history_button.isChecked()
+    assert window.plate.record is None and window.plate.empty_text == "无接触"
+    assert window.history_button.isEnabled() and not window.export_button.isEnabled()
+
+
+def test_replacing_live_segment_discards_in_flight_preview_without_an_intervening_draw(
+        display, qt_app, monkeypatch):
+    window, capture = display
+    first, second = _sample(), _sample()
+    blocker = Event()
+    render = ui.render_contact_print
+
+    def render_after_release(frames):
+        if frames is first.frames:
+            assert blocker.wait(4)
+        return render(frames)
+
+    monkeypatch.setattr(ui, "render_contact_print", render_after_release)
+    try:
+        capture.press(first)
+        window.refresh()
+        capture.release()
+        capture.press(second)
+        window.refresh()
+        assert window.plate.record is None
+    finally:
+        blocker.set()
+    _settle(window, second, qt_app)
+    assert window.plate.record is second and not window.plate.historical

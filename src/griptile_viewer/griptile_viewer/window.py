@@ -151,7 +151,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
         header.addWidget(self.brand)
         self.contact_print_button = QtWidgets.QPushButton("触印")
         self.contact_print_button.setObjectName("contactPrint")
-        self.contact_print_button.setToolTip("查看接触变化留下的印迹，也可以手动取印")
+        self.contact_print_button.setToolTip("查看当前接触，也可回看上次留印")
         self.contact_print_button.clicked.connect(self.open_contact_print)
         header.addWidget(self.contact_print_button)
         header.addStretch()
@@ -441,7 +441,6 @@ class ViewerWindow(QtWidgets.QMainWindow):
         model.track_clock(now)
         self.equalization.sync()
         model.update_contact_print(now, self.equalization.active)
-        self.contact_print_button.setText("查看触印" if model.contact_prints.latest is not None else "触印")
         if self.contact_print_dialog is not None and self.contact_print_dialog.isVisible():
             self.contact_print_dialog.refresh()
         message = model.message
@@ -510,8 +509,8 @@ class ViewerWindow(QtWidgets.QMainWindow):
                     self.source_scale.setText("源图配色　白色无载　灰色缺测" if legacy_unloaded.any()
                                               else "源图配色　灰色缺测")
             self.image.setImage(frame, autoLevels=False, levels=None)
-            summary = (f"接触 {active.sum()} 点　有效像素 {usable.sum()}/400" if usable.any()
-                       else "接触点待测　有效像素 0/400")
+            summary = (f"有响应 {active.sum()} 点　有效像素 {usable.sum()}/400" if usable.any()
+                       else "等待响应数据　有效像素 0/400")
             if surface:
                 summary = "300×300 插值显示 · 20×20 实测点　" + summary
         else:

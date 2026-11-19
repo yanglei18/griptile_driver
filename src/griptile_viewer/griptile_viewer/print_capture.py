@@ -49,12 +49,16 @@ class ContactPrintCapture:
         self._pressed_since = None
         self._quiet_since = None
         self._armed = False
-        self._active_taxels = np.zeros(SHAPE, dtype=bool)
 
     def interrupt(self):
         """Drop in-flight evidence on a gap; keep already taken prints and the time watermark."""
         self._samples.clear()
         self._automatic_since = None
+        self._active_taxels = np.zeros(SHAPE, dtype=bool)
+        self.contact_present = None  # False requires a complete measured absence of contact evidence.
+        self.contact_id = None       # A render from an earlier contact cannot share this token.
+        self._preview_since = None
+        self._preview = None
         self._clear_event()
 
     def reset(self):
@@ -86,14 +90,22 @@ class ContactPrintCapture:
         if not valid.any():
             self.interrupt()
             return
+        complete = bool(valid.all())
+        relative = np.divide(field, thresholds, out=np.zeros(SHAPE), where=valid)
+        seeded = relative >= CONTACT_SEED_RATIO
+        # The same measured taxel can follow a lighter hold all the way down
+        # to the support floor. A different weak background taxel cannot.
+        self._active_taxels = seeded | (self._active_taxels & (relative >= CONTACT_SUPPORT_RATIO))
+        present = bool(self._active_taxels.any())
+        if present and self.contact_id is None:
+            self.contact_id = object()
+        elif not present and self.contact_id is not None:
+            self.contact_id = None
+            self._preview_since = stamp_ns
+        self.contact_present = present if complete or present else None
+        self._preview = None
         strength = None
-        if valid.all():
-            relative = field / thresholds
-            # Re-use the contour thresholds over time at each measured location.
-            # A lighter hold stays active until its original taxel falls below
-            # the support floor. Unrelated background cannot keep the event open.
-            self._active_taxels = ((relative >= CONTACT_SEED_RATIO)
-                                   | (self._active_taxels & (relative >= CONTACT_SUPPORT_RATIO)))
+        if complete:
             strength = float(np.sum(relative, where=self._active_taxels, dtype=np.float64))
         else:
             field = np.where(valid, field, np.nan)
@@ -105,7 +117,7 @@ class ContactPrintCapture:
         oldest = stamp_ns - self.HISTORY_NS
         while self._samples[0].stamp_ns < oldest:
             self._samples.popleft()
-        self._advance_event(stamp_ns, strength)
+        self._advance_event(stamp_ns, strength, bool(seeded.any()))
 
     def _triplet(self, end):
         """Choose actual observations nearest both previous exposure times."""
@@ -117,28 +129,36 @@ class ContactPrintCapture:
         middle_sample = min(self._samples, key=lambda s: abs(s.stamp_ns - middle))
         return (first_sample, middle_sample, end)
 
-    def _manual_triplet(self):
-        if self._samples:
+    def preview(self):
+        """Current registered exposures, bounded by the preceding contact and independent of saved prints."""
+        if self.contact_present is not True:
+            return None
+        if self._preview is None:
             triplet = self._triplet(self._samples[-1])
-            if triplet and np.logical_and.reduce([np.isfinite(s.field) for s in triplet]).any():
-                return triplet
-        return None
+            if triplet is None or (self._preview_since is not None and triplet[0].stamp_ns < self._preview_since):
+                return None
+            supported = np.logical_and.reduce([np.isfinite(s.field) for s in triplet])
+            if not (supported & self._active_taxels).any():
+                return None
+            self._preview = self._print(triplet, automatic=False)
+        return self._preview
 
     @property
     def can_snapshot(self):
-        return self._manual_triplet() is not None
+        return self.preview() is not None
 
-    def _take(self, triplet, *, automatic):
-        self.latest = ContactPrint(tuple(s.stamp_ns for s in triplet), tuple(s.field for s in triplet),
-                                   automatic, self._profile is not None)
-        return self.latest
+    def _print(self, triplet, *, automatic):
+        return ContactPrint(tuple(s.stamp_ns for s in triplet), tuple(s.field for s in triplet),
+                            automatic, self._profile is not None)
 
     def snapshot(self):
         """Capture the most recent three exposures on operator request."""
-        triplet = self._manual_triplet()
-        return self._take(triplet, automatic=False) if triplet else None
+        record = self.preview()
+        if record is not None:
+            self.latest = record
+        return record
 
-    def _advance_event(self, stamp_ns, strength):
+    def _advance_event(self, stamp_ns, strength, seeded):
         if strength is None:
             self._clear_event()
             self._automatic_since = None
@@ -147,9 +167,9 @@ class ContactPrintCapture:
             self._automatic_since = stamp_ns
         if strength > 0:
             self._quiet_since = None
-            if self._pressed_since is None:
+            if self._pressed_since is None and seeded:
                 self._pressed_since = stamp_ns
-            if stamp_ns - self._pressed_since >= self.ARM_NS:
+            if self._pressed_since is not None and stamp_ns - self._pressed_since >= self.ARM_NS:
                 self._armed = True
             return
         self._pressed_since = None
@@ -180,4 +200,4 @@ class ContactPrintCapture:
             if drop > best_drop:
                 best, best_drop = triplet, drop
         if best:
-            self._take(best, automatic=True)
+            self.latest = self._print(best, automatic=True)
