@@ -224,6 +224,60 @@ def test_edge_taxel_stays_registered_when_proofs_arrive_and_style_changes(displa
     assert painted_taxel() == expected
 
 
+def test_proof_strip_only_opens_on_request_and_exports_all_three_frames(display, qt_app, tmp_path):
+    page, capture = display
+    # Distinct uniform responses make each exposure recognizable in the actual window and PNG.
+    levels = (300, 1500, 2700)
+    fields = tuple(np.full((20, 20), level, dtype=np.float32) for level in levels)
+    triplet = replace(_sample(), frames=fields, footprints=tuple(field > 0 for field in fields))
+    first = replace(triplet, frames=fields[:1], footprints=triplet.footprints[:1],
+                    stamps_ns=triplet.stamps_ns[:1])
+
+    def expect_closed():
+        assert not page.proofs_checkbox.isChecked()
+        image = page.plate.grab().toImage()
+        for y in (image.height() * 4 // 5, image.height() - 3):
+            assert image.pixelColor(2, y) == ui.GROUND
+
+    def expect_proofs(image):
+        assert image.pixelColor(2, image.height() - 3) == ui.PAPER
+        for i, level in enumerate(levels):
+            x = image.width() * (2 * i + 1) // 6
+            color = QtGui.QColor(*contact_intensity_rgb(level, triplet.span_adc))
+            count = sum(image.pixelColor(x, y) == color
+                        for y in range(image.height() * 2 // 3, image.height()))
+            assert count > image.height() // 20
+
+    expect_closed()
+    capture.press(first)
+    _settle(page, first, qt_app)
+    expect_closed()
+    capture.live, capture.can_snapshot = triplet, True
+    _settle(page, triplet, qt_app)
+    expect_closed()
+    page.shutter_button.click()
+    capture.release()
+    page.refresh()
+    expect_closed()
+    page.history_button.click()
+    _settle(page, triplet, qt_app)
+    expect_closed()
+    path = tmp_path / "proofs.png"
+    page.save_png(path)
+    expect_proofs(QtGui.QImage(str(path)))
+    page.history_button.click()
+    capture.press(triplet)
+    _settle(page, triplet, qt_app)
+    expect_closed()
+
+    page.proofs_checkbox.click()
+    qt_app.processEvents()
+    expect_proofs(page.plate.grab().toImage())
+    page.proofs_checkbox.click()
+    qt_app.processEvents()
+    expect_closed()
+
+
 def test_first_frame_shows_its_face_before_three_exposures_exist(display, qt_app):
     window, capture = display
     triplet = _sample()

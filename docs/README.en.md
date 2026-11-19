@@ -61,9 +61,9 @@ The print page shows the full 20×20 array by default. Each taxel keeps its plac
 
 The print uses a black ground. A single observation produces a neutral impression. Once three exposures are available, their equal-response lines are registered inside the latest measured footprint at the same position and scale. Copper highlights growing responses, cyan highlights receding responses, and aligned impressions approach ivory. The latest observation determines the outer edges and holes. Separate patches stay separate and the live print clears on release.
 
-Once sufficient observations are available, three color panels show the responses about 600 ms ago, 300 ms ago and at the latest sample. They show the same region as the main print and share a fixed color scale. These panels include weak readings outside the detected footprint and help explain how its shape and strength change during loading and release.
+Live and saved prints show only the main image by default. Select **三帧对照** (Compare three frames) to expand the color panels below the print. Clear it to collapse them. The page keeps your choice as new readings arrive and automatic prints are captured. The panels show the responses about 600 ms ago, 300 ms ago and at the latest sample. They share the main image's region and use a fixed color scale. Their weak readings outside the detected footprint can help explain how its shape and strength change during loading and release.
 
-Select **响应** to color the large contact footprint on the same fixed ADC scale as the three response panels. Values above the recorded span stay red, while the peak readout retains the last exposure's actual ADC response. Saved prints can be reviewed in either style. PNG exports use the region, style and legend shown in the window. The known-load workflow provides a separate force estimate in newtons.
+Select **响应** to color the large contact footprint on the same fixed ADC scale as the three response panels. Values above the recorded span stay red, while the peak readout retains the last exposure's actual ADC response. Saved prints can be reviewed in either style. PNG exports always include the main image, all three response panels and the legend, using the current region and style. The known-load workflow provides a separate force estimate in newtons.
 
 Use the existing unloaded reference. A taxel reaching eight times its own threshold seeds a patch and continues to be tracked down to twice that threshold. Side-adjacent taxels at or above twice their own thresholds extend that footprint in the current frame. The boundary is interpolated between measured points. Equalization affects the displayed colors. The count describes native taxels included in the footprint. A complete observation with no tracked contact clears the live image immediately. A data gap displays a waiting state.
 
@@ -71,7 +71,7 @@ During contact, **拍下当前** takes a manual print once about 0.6 seconds of 
 
 The live viewer matches the native 20×20 scalar response to its source state and labels prints made with active taxel equalization. Standard bag replay reconstructs the scalar response from samples and the recorded reference. Interpolated contours visualize the footprint between measured points. The ROS `state` and `contact_response` topics supply native data for quantitative analysis and CV.
 
-![Synthetic ring unloading on one side, with three color exposures beneath the latest response](contact-print.png)
+![Expanded three-frame comparison showing a synthetic ring unloading on one side, with three color exposures below the main print](contact-print.png)
 
 ### Match taxel colors under equal local pressure
 

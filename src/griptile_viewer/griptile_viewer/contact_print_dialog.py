@@ -68,14 +68,14 @@ def _draw_exposure(painter, rect, image, bounds):
     painter.drawImage(target, image, source)
 
 
-def _draw_response_scale(painter, x, width, bottom, span_adc):
+def _draw_response_scale(painter, x, width, bottom, span_adc, text_color=SUBTLE):
     gradient = QtGui.QLinearGradient(x, 0, x + width, 0)
     for level, rgb in CONTACT_COLOR_STOPS:
         gradient.setColorAt(level, QtGui.QColor(*rgb))
     painter.fillRect(QtCore.QRectF(x, bottom - 28, width, 7), gradient)
     label = QtCore.QRectF(x, bottom - 20, width, 18)
-    _text(painter, label, "弱  0", SUBTLE, 12)
-    _text(painter, label, f"≥{span_adc:g} ADC · 红色饱和", SUBTLE, 12, right=True)
+    _text(painter, label, "弱  0", text_color, 12)
+    _text(painter, label, f"≥{span_adc:g} ADC · 红色饱和", text_color, 12, right=True)
 
 
 def _draw_ink_key(painter, x, width, y, has_proofs, has_missing_history):
@@ -97,6 +97,7 @@ class _PrintPlate(QtWidgets.QWidget):
         self.record = None
         self.images = ()
         self.bounds = FULL_ARRAY
+        self.show_proofs = False
         self.proof_labels = ()
         self.incomplete = False
         self.missing_history = False
@@ -161,17 +162,17 @@ class _PrintPlate(QtWidgets.QWidget):
     def paintEvent(self, event):
         painter = QtGui.QPainter(self)
         try:
-            self.draw(painter, self.width(), self.height())
+            self.draw(painter, self.width(), self.height(), show_proofs=self.show_proofs)
         finally:
             painter.end()
 
-    def draw(self, painter, width, height):
+    def draw(self, painter, width, height, *, show_proofs=False):
         rect = QtCore.QRectF
         margin = min(28, max(12, width // 24))
         title = min(48, max(30, width // 14))
         has_proofs = len(self.images) > 1
-        # Reserve the proof strip from the first frame so adding exposures cannot move the array.
-        proof_height = min(188, max(116, height // 3))
+        # Only the user's layout choice controls the space available to the main image.
+        proof_height = min(188, max(116, height // 3)) if show_proofs else 0
         hero = height - proof_height
         painter.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, not self.incomplete)
         painter.fillRect(rect(0, 0, width, height), GROUND)
@@ -190,17 +191,6 @@ class _PrintPlate(QtWidgets.QWidget):
             painter.setPen(QtGui.QColor("#abafa8"))
             painter.drawText(rect(0, 55, width, height - 85), QtCore.Qt.AlignCenter, self.empty_text)
             return
-        painter.fillRect(rect(0, hero, width, proof_height), PAPER)
-        tile_top = hero + 29
-        tile_h = max(24, proof_height - 85)
-        gap = max(6, margin // 2)
-        tile_w = (width - 2 * margin - 2 * gap) / 3
-        proof_note = "三帧响应 · 同一色标" if has_proofs else "等待三帧对照"
-        if self.incomplete:
-            proof_note += " · 灰色为缺测"
-        _text(painter, rect(margin, hero + 4, width - 2 * margin, 22), proof_note, INK, 13)
-        _text(painter, rect(margin, hero + 4, width - 2 * margin, 22),
-              self.peak_text, INK, 12, right=True)
         bounds = self.bounds
         if bounds != FULL_ARRAY and width >= 380:
             # Locator shows the selected region in the full physical array.
@@ -217,11 +207,26 @@ class _PrintPlate(QtWidgets.QWidget):
         _draw_exposure(painter, view, self.images[0], bounds)
         if imprint:
             _draw_ink_key(painter, margin, width - 2 * margin, hero - 51, has_proofs, self.missing_history)
+        elif not show_proofs:
+            _draw_response_scale(painter, margin, width - 2 * margin, hero - 27, self.record.span_adc, PAPER)
         _text(painter, rect(margin, hero - 29, width - 2 * margin, 21), self.caption(), PAPER, 12)
         address = (f"行 {bounds.top()}–{bounds.bottom()}　列 {bounds.left()}–{bounds.right()}"
                    if bounds != FULL_ARRAY else "全阵列")
         _text(painter, rect(width / 2, hero - 29, width / 2 - margin, 21),
               address, QtGui.QColor("#b6b9af"), 12, right=True)
+        if not show_proofs:
+            return
+        painter.fillRect(rect(0, hero, width, proof_height), PAPER)
+        tile_top = hero + 29
+        tile_h = max(24, proof_height - 85)
+        gap = max(6, margin // 2)
+        tile_w = (width - 2 * margin - 2 * gap) / 3
+        proof_note = "三帧响应 · 同一色标" if has_proofs else "等待三帧对照"
+        if self.incomplete:
+            proof_note += " · 灰色为缺测"
+        _text(painter, rect(margin, hero + 4, width - 2 * margin, 22), proof_note, INK, 13)
+        _text(painter, rect(margin, hero + 4, width - 2 * margin, 22),
+              self.peak_text, INK, 12, right=True)
         for i, image in enumerate(self.images[1:]):
             x = margin + i * (tile_w + gap)
             tile = rect(x, tile_top, tile_w, tile_h)
@@ -237,7 +242,7 @@ class _PrintPlate(QtWidgets.QWidget):
         painter = QtGui.QPainter(image)
         try:
             painter.scale(2, 2)
-            self.draw(painter, 640, 600)
+            self.draw(painter, 640, 600, show_proofs=True)
         finally:
             painter.end()
         return image
@@ -281,6 +286,8 @@ class ContactPrintPage(QtWidgets.QWidget):
             button.setAutoDefault(False)
             controls.addWidget(button)
         controls.addStretch()
+        self.proofs_checkbox = QtWidgets.QCheckBox("三帧对照", self)
+        controls.addWidget(self.proofs_checkbox)
         self.zoom = QtWidgets.QCheckBox("放大接触区", self)
         self.zoom.setAccessibleDescription("锁定此刻的接触区域。取消后查看完整的 20 × 20 阵列。")
         controls.addWidget(self.zoom)
@@ -304,8 +311,13 @@ class ContactPrintPage(QtWidgets.QWidget):
         self.shutter_button.clicked.connect(self._snapshot)
         self.export_button.clicked.connect(self._export)
         self.history_button.clicked.connect(self.refresh)
+        self.proofs_checkbox.toggled.connect(self._show_proofs)
         self.zoom.toggled.connect(self._set_zoom)
         self.style_combo.currentIndexChanged.connect(self.refresh)
+
+    def _show_proofs(self, enabled):
+        self.plate.show_proofs = enabled
+        self.plate.update()
 
     def _set_zoom(self, enabled):
         record = self.plate.record

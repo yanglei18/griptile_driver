@@ -5,7 +5,7 @@
 - Add a contact-print page for live and replay data with three source-timed exposures, manual capture, automatic release prints, and a labeled PNG export.
 - Clear the live print at the first observed release and offer completed prints in a separate history view. Disable manual capture on an unloaded or indeterminate array.
 - Render the latest contact print and its three source-timed exposures on the same acquisition-bound RGB response scale, with a labeled color legend and an unclipped peak readout.
-- Show the contact footprint from the first supported observation. Trace each patch and its holes from noise-referenced native taxels, with three full response maps for comparison once the time history is available.
+- Show the contact footprint from the first supported observation. Trace each patch and its holes from noise-referenced native taxels. Live and saved prints open on the main image. Select **三帧对照** to expand the three response maps on the same page. Automatic capture respects this choice, and PNG exports always include the three maps.
 - Use a dark three-exposure imprint as the default contact print, with copper, cyan and ivory lines confined to the current measured footprint. Keep the calibrated color map available for viewing and export.
 - Switch between the contact print and the array controls in the same main window. Use `imprint:=true` to start on the print page during acquisition or replay. Automatic print capture continues on the array page.
 - Keep the contact print at a fixed full-array scale as the footprint changes and the three exposures arrive. Manual zoom locks the selected region for live viewing, history and PNG export.
