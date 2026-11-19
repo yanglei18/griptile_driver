@@ -18,7 +18,7 @@ from griptile_core.equalization import apply_equalization
 from griptile_core.grid import ROWS, COLS
 from .equalization_store import EqualizationSettings
 from .equalization_dialog import EqualizationDialog
-from .contact_print_dialog import ContactPrintDialog
+from .contact_print_dialog import ContactPrintPage
 from .load_dialog import LoadDialog
 from .serial_dialog import SerialDialog
 from .storage import load_reference, save_reference, save_snapshot
@@ -114,7 +114,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.serial_dialog = None
         self.equalization = EqualizationSettings(model)
         self.equalization_dialog = None
-        self.contact_print_dialog = None
+        self.contact_print_page = None
         self.last_receipt_wall_ns = time.monotonic_ns()
         self.last_message = None
         self.setWindowTitle(f"GripTile · 触觉显示 · {model.sensor_id}")
@@ -136,7 +136,9 @@ class ViewerWindow(QtWidgets.QMainWindow):
         """)
         self.resize(560, 620)
         central = QtWidgets.QWidget()
-        self.setCentralWidget(central)
+        self.pages = QtWidgets.QStackedWidget()
+        self.setCentralWidget(self.pages)
+        self.pages.addWidget(central)
         layout = QtWidgets.QVBoxLayout(central)
         layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(8)
@@ -151,7 +153,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
         header.addWidget(self.brand)
         self.contact_print_button = QtWidgets.QPushButton("触印")
         self.contact_print_button.setObjectName("contactPrint")
-        self.contact_print_button.setToolTip("查看当前接触，也可回看上次留印")
+        self.contact_print_button.setAccessibleDescription("查看当前接触，也可回看上次留印")
         self.contact_print_button.clicked.connect(self.open_contact_print)
         header.addWidget(self.contact_print_button)
         header.addStretch()
@@ -352,13 +354,24 @@ class ViewerWindow(QtWidgets.QMainWindow):
             self.serial_dialog = SerialDialog(self, self.serial_control)
         self.serial_dialog.open_settings()
 
+    @property
+    def contact_print_dialog(self):
+        """Archived replay scripts access the active print through this name."""
+        return self.contact_print_page
+
     def open_contact_print(self):
-        if self.contact_print_dialog is None:
-            self.contact_print_dialog = ContactPrintDialog(self, self.model.contact_prints)
-        self.contact_print_dialog.show()
-        self.contact_print_dialog.raise_()
-        self.contact_print_dialog.activateWindow()
-        self.contact_print_dialog.refresh()
+        if self.contact_print_page is None:
+            self.contact_print_page = ContactPrintPage(self.pages, self.model.contact_prints)
+            self.pages.addWidget(self.contact_print_page)
+            self.contact_print_page.back_button.clicked.connect(self.show_array)
+        self.pages.setCurrentWidget(self.contact_print_page)
+        self.setWindowTitle(f"GripTile · 触印 · {self.model.sensor_id}")
+        self.contact_print_page.back_button.setFocus()
+
+    def show_array(self):
+        self.pages.setCurrentIndex(0)
+        self.setWindowTitle(f"GripTile · 触觉显示 · {self.model.sensor_id}")
+        self.contact_print_button.setFocus()
 
     def open_equalization_dialog(self):
         if self.model.replay:
@@ -441,8 +454,8 @@ class ViewerWindow(QtWidgets.QMainWindow):
         model.track_clock(now)
         self.equalization.sync()
         model.update_contact_print(now, self.equalization.active)
-        if self.contact_print_dialog is not None and self.contact_print_dialog.isVisible():
-            self.contact_print_dialog.refresh()
+        if self.contact_print_page is not None:
+            self.contact_print_page.refresh()
         message = model.message
         wall_ns = time.monotonic_ns()
         if message is not self.last_message:

@@ -260,11 +260,12 @@ def test_window_collects_contact_print_before_open_and_separates_references(open
             window.refresh()
             model.accept_response(scalar)
         window.refresh()
-    assert window.contact_print_dialog is None
     window.contact_print_button.click()
-    dialog = window.contact_print_dialog
-    assert dialog.isVisible() and dialog.shutter_button.isEnabled()
-    dialog.shutter_button.click()
+    page = window.contact_print_page
+    assert page.window() is window and window.pages.currentWidget() is page
+    assert page.isVisible() and page.shutter_button.isEnabled()
+    page.shutter_button.click()
+    assert window.pages.currentWidget() is page and not page.history_button.isChecked()
     saved = model.contact_prints.latest
     assert not saved.automatic
     assert saved.span_adc == 1600.0
@@ -275,8 +276,8 @@ def test_window_collects_contact_print_before_open_and_separates_references(open
     state = snapshot(assembler, 17, START + now)
     model.accept(state, now)
     window.refresh()
-    assert model.contact_prints.latest is saved and not dialog.shutter_button.isEnabled()
-    assert model.contact_prints.contact_present is None and dialog.history_button.isEnabled()
+    assert model.contact_prints.latest is saved and not page.shutter_button.isEnabled()
+    assert model.contact_prints.contact_present is None and page.history_button.isEnabled()
     if replay:
         now = 0
     else:
@@ -294,7 +295,53 @@ def test_window_collects_contact_print_before_open_and_separates_references(open
         model.accept_reference(reference)
     window.refresh()
     assert model.contact_prints.latest is None
-    assert not dialog.export_button.isEnabled()
+    assert not page.export_button.isEnabled()
+
+
+def test_print_navigation_and_background_capture_share_one_window(open_window, qt_app):
+    model = ArrayView(SENSOR)
+    assembler = Assembler(sensor_id=SENSOR)
+    first = snapshot(assembler, 1, START)
+    ref = profile_status()
+    ref.header, ref.direction = first.header, "both"
+    model.accept_reference(ref)
+    model.accept(first, 0)
+    now = 0
+    existing_windows = {w for w in qt_app.topLevelWidgets() if w.isVisible()}
+    window = open_window(model, clock_ns=lambda: now)
+    monitor = window.pages.currentWidget()
+    assert window.contact_print_button.isVisible() and not window.contact_print_button.toolTip()
+    assert {w for w in qt_app.topLevelWidgets() if w.isVisible()} == existing_windows | {window}
+    window.contact_print_button.click()
+    page = window.contact_print_page
+    assert page.window() is window and not page.isWindow()
+    assert page.isVisible() and window.pages.currentWidget() is page
+    assert all(not widget.toolTip() for widget in
+               (page, page.plate, page.back_button, page.zoom, page.style_combo,
+                page.shutter_button, page.history_button, page.export_button))
+    page.back_button.click()
+    assert window.pages.currentWidget() is monitor and not page.isVisible()
+
+    # A full press and release while watching the monitor must save a print without navigating.
+    for i in range(1, 30):
+        now = i * 50_000_000
+        state = snapshot(assembler, i + 1, START + now)
+        model.accept(state, now)
+        model.accept_response(response(state, np.full((20, 20), 900 if i <= 20 else 0)))
+        window.refresh()
+        assert window.pages.currentWidget() is monitor
+    saved = model.contact_prints.latest
+    assert saved is not None and saved.automatic
+    window.open_contact_print()
+    assert window.pages.currentWidget() is page and page.history_button.isEnabled()
+    assert page.plate.empty_text == "无接触" and not page.history_button.isChecked()
+    page.history_button.click()
+    assert page.history_button.isChecked() and page.history_button.text() == "返回实时"
+    page.back_button.click()
+    window.contact_print_button.click()
+    assert not page.history_button.isChecked() and page.plate.empty_text == "无接触"
+    assert model.contact_prints.latest is saved
+    assert {w for w in qt_app.topLevelWidgets() if w.isVisible()} == existing_windows | {window}
 
 
 def test_contact_print_requires_new_rows_and_native_scalar():

@@ -243,7 +243,7 @@ class _PrintPlate(QtWidgets.QWidget):
         return image
 
 
-class ContactPrintDialog(QtWidgets.QDialog):
+class ContactPrintPage(QtWidgets.QWidget):
     # Keep acquisition and normal Qt painting responsive while showing the latest contact.
     PREVIEW_INTERVAL = 0.1
 
@@ -255,16 +255,15 @@ class ContactPrintDialog(QtWidgets.QDialog):
         self._view = None
         self._next_preview = 0.
         self._error = ""
-        self.setWindowTitle("GripTile · 触印")
-        self.setWindowModality(QtCore.Qt.NonModal)
-        self.resize(620, 660)
+        self.setObjectName("contactPrintPage")
+        self.setAttribute(QtCore.Qt.WA_StyledBackground)
         self.setStyleSheet("""
-            QDialog { background: #ede8d9; }
-            QDialog QLabel, QDialog QCheckBox { color: #353e3b; font-size: 13px; }
-            QDialog QPushButton, QDialog QComboBox { background: #efece4; color: #22292a; border: 1px solid #969b90;
+            QWidget#contactPrintPage { background: #ede8d9; }
+            QLabel, QCheckBox { color: #353e3b; font-size: 13px; }
+            QPushButton, QComboBox { background: #efece4; color: #22292a; border: 1px solid #969b90;
                 border-radius: 3px; min-height: 23px; padding: 3px 11px; }
             QPushButton#shutter { background: #26383a; color: #f5f1e5; }
-            QDialog QPushButton:disabled, QPushButton#shutter:disabled { color: #777c78; background: #deded4; }
+            QPushButton:disabled, QPushButton#shutter:disabled { color: #777c78; background: #deded4; }
         """)
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 12)
@@ -273,6 +272,8 @@ class ContactPrintDialog(QtWidgets.QDialog):
         layout.addWidget(self.plate, 1)
         controls = QtWidgets.QHBoxLayout()
         controls.setContentsMargins(12, 4, 12, 0)
+        self.back_button = QtWidgets.QPushButton("返回阵列", self)
+        controls.addWidget(self.back_button)
         self.shutter_button = QtWidgets.QPushButton("拍下当前", self)
         self.shutter_button.setObjectName("shutter")
         self.export_button = QtWidgets.QPushButton("导出触印", self)
@@ -281,7 +282,7 @@ class ContactPrintDialog(QtWidgets.QDialog):
             controls.addWidget(button)
         controls.addStretch()
         self.zoom = QtWidgets.QCheckBox("放大接触区", self)
-        self.zoom.setToolTip("锁定此刻的接触区域。取消后查看完整的 20 × 20 阵列。")
+        self.zoom.setAccessibleDescription("锁定此刻的接触区域。取消后查看完整的 20 × 20 阵列。")
         controls.addWidget(self.zoom)
         layout.addLayout(controls)
         self.status = QtWidgets.QLabel(self)
@@ -295,7 +296,7 @@ class ContactPrintDialog(QtWidgets.QDialog):
         info.addWidget(self.status, 1)
         self.style_combo = QtWidgets.QComboBox(self)
         self.style_combo.setAccessibleName("主图显示方式")
-        self.style_combo.setToolTip("主图可查看触印纹理或接触响应强度")
+        self.style_combo.setAccessibleDescription("主图可查看触印纹理或接触响应强度")
         self.style_combo.addItem("触印", "imprint")
         self.style_combo.addItem("响应", "response")
         info.addWidget(self.style_combo)
@@ -318,12 +319,12 @@ class ContactPrintDialog(QtWidgets.QDialog):
         self.history_button.setChecked(False)
         self.refresh()
 
-    def closeEvent(self, event):
+    def hideEvent(self, event):
         if self._executor is not None:
             self._executor.shutdown(wait=False, cancel_futures=True)
             self._executor = None
         self._work = None
-        super().closeEvent(event)
+        super().hideEvent(event)
 
     def _update_plate(self, view, target, empty):
         """Render one frame at a time. A result only belongs to its source contact or saved print."""
@@ -410,3 +411,7 @@ class ContactPrintDialog(QtWidgets.QDialog):
             raise ValueError("请先打开上次留印")
         if not self.plate.export_image().save(str(path), "PNG"):
             raise OSError("无法保存触印")
+
+
+# Retain the import used by the standalone print export scripts.
+ContactPrintDialog = ContactPrintPage

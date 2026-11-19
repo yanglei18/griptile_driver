@@ -41,12 +41,15 @@ class _Capture:
 @pytest.fixture
 def display(qt_app):
     capture = _Capture()
-    window = ui.ContactPrintDialog(None, capture)
-    window.show()
+    host = QtWidgets.QStackedWidget()
+    page = ui.ContactPrintPage(host, capture)
+    host.addWidget(page)
+    host.resize(620, 660)
+    host.show()
     qt_app.processEvents()
-    yield window, capture
-    window.close()
-    window.deleteLater()
+    yield page, capture
+    host.close()
+    host.deleteLater()
     qt_app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
     qt_app.processEvents()
 
@@ -73,7 +76,7 @@ def _settle(window, record, qt_app):
 
 def test_manual_capture_actual_timing_full_array_and_export(display, qt_app, tmp_path):
     window, capture = display
-    assert not window.isModal()
+    assert not window.isWindow()
     assert not window.shutter_button.isEnabled()
     assert not window.history_button.isEnabled() and window.plate.empty_text == "等待有效读数"
     assert not window.export_button.isEnabled()
@@ -115,7 +118,7 @@ def test_manual_capture_actual_timing_full_array_and_export(display, qt_app, tmp
         x = int(2 * (margin + level * (640 - 2 * margin)))
         x = min(x, 2 * (640 - margin) - 1)
         np.testing.assert_allclose(full_array.pixelColor(x, 1140).getRgb()[:3], rgb, atol=3)
-    window.resize(335, 475)
+    window.window().resize(335, 475)
     qt_app.processEvents()
     path = tmp_path / "actual.png"
     window.save_png(path)
@@ -319,7 +322,7 @@ def test_live_preview_advances_and_reopen_defaults_to_current_contact(display, q
     assert not window.plate.images and not window.plate.proof_labels
     window.history_button.click()
     _settle(window, first, qt_app)
-    window.close()
+    window.hide()
     window.show()
     assert not window.history_button.isChecked()
     assert window.plate.record is None and window.plate.empty_text == "无接触"

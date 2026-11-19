@@ -127,9 +127,9 @@ def main(args=None):
         cleanup.callback(executor.shutdown)
         executor.add_node(node)
         window = ViewerWindow(node.model, node.view_clock, node.request_reference, serial_control=node.serial_control)
-        window.show()
         if node.open_imprint:
             window.open_contact_print()
+        window.show()
         ros_timer = QtCore.QTimer()
 
         def poll():

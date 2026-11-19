@@ -51,13 +51,13 @@ ros2 service call /tactile/sensor_0/set_contact_reference griptile_msgs/srv/SetC
 
 ### See the shape of the contact footprint
 
-Open the live contact print at startup with the command below. The main window also opens for serial settings and unloaded reference controls. The same option works with `replay.launch.py` for recorded data.
+In the main window, select **触印** (Contact print) to switch from the array page to the print page. Select **返回阵列** (Back to array) for serial settings and unloaded reference controls. To start directly on the print page, run the command below. The same option works with `replay.launch.py` for recorded data.
 
 ```bash
 ros2 launch griptile_driver sensor.launch.py imprint:=true
 ```
 
-Click **触印** beside the GripTile name. The full 20×20 array is visible by default. Each taxel keeps its place on screen as contact patches move, grow or split. To inspect a detail, select **放大接触区** to lock the view to the current contact region. Clear it to return to the full array.
+The print page shows the full 20×20 array by default. Each taxel keeps its place on screen as contact patches move, grow or split. To inspect a detail, select **放大接触区** to lock the view to the current contact region. Clear it to return to the full array.
 
 The print uses a black ground. A single observation produces a neutral impression. Once three exposures are available, their equal-response lines are registered inside the latest measured footprint at the same position and scale. Copper highlights growing responses, cyan highlights receding responses, and aligned impressions approach ivory. The latest observation determines the outer edges and holes. Separate patches stay separate and the live print clears on release.
 
@@ -67,7 +67,7 @@ Select **响应** to color the large contact footprint on the same fixed ADC sca
 
 Use the existing unloaded reference. A taxel reaching eight times its own threshold seeds a patch and continues to be tracked down to twice that threshold. Side-adjacent taxels at or above twice their own thresholds extend that footprint in the current frame. The boundary is interpolated between measured points. Equalization affects the displayed colors. The count describes native taxels included in the footprint. A complete observation with no tracked contact clears the live image immediately. A data gap displays a waiting state.
 
-During contact, **拍下当前** takes a manual print once about 0.6 seconds of continuous readings are available. Following sustained contact, 0.3 seconds below the release threshold confirms an automatic print from the decline. Select **上次留印** to review and export the saved print with its exposures and legend. The live view stays current when a print is saved. Automatic capture also works with the print window closed.
+During contact, **拍下当前** takes a manual print once about 0.6 seconds of continuous readings are available. Following sustained contact, 0.3 seconds below the release threshold confirms an automatic print from the decline. Select **上次留印** to review and export the saved print with its exposures and legend. Select **返回实时** to see the current contact again. Acquisition and automatic capture continue while you use the array page.
 
 The live viewer matches the native 20×20 scalar response to its source state and labels prints made with active taxel equalization. Standard bag replay reconstructs the scalar response from samples and the recorded reference. Interpolated contours visualize the footprint between measured points. The ROS `state` and `contact_response` topics supply native data for quantitative analysis and CV.
 
