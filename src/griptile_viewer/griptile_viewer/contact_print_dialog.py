@@ -6,7 +6,7 @@ from time import monotonic
 import numpy as np
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
-from griptile_core.contact_image import CONTACT_COLOR_STOPS
+from griptile_core.contact_image import CONTACT_COLOR_STOPS, contact_surface_rgb
 from griptile_core.contact_print import render_contact_face, render_contact_print
 from griptile_core.grid import COLS, ROWS
 
@@ -37,12 +37,13 @@ def _qimage(pixels):
                         data.strides[0], QtGui.QImage.Format_RGB888).copy()
 
 
-def _render_exposures(record, style):
+def _render_exposures(record, style, include_proofs):
     footprint = record.footprints[-1] if record.footprints is not None else None
     if len(record.frames) == 1:
         return (render_contact_face(record.frames[-1], record.span_adc, footprint, style=style),)
-    face, proofs = render_contact_print(record.frames, record.span_adc, footprint, style=style)
-    return (face, *proofs)
+    face, proofs = render_contact_print(record.frames, record.span_adc, footprint,
+                                        style=style, include_proofs=include_proofs)
+    return (face,) if proofs is None else (face, *proofs)
 
 
 def _font(size, *, serif=False):
@@ -95,7 +96,8 @@ class _PrintPlate(QtWidgets.QWidget):
     def __init__(self, parent):
         super().__init__(parent)
         self.record = None
-        self.images = ()
+        self.face = None
+        self._proof_images = ()
         self.bounds = FULL_ARRAY
         self.show_proofs = False
         self.proof_labels = ()
@@ -113,7 +115,8 @@ class _PrintPlate(QtWidgets.QWidget):
                 and self.accessibleDescription() == message):
             return
         self.record = None
-        self.images = self.proof_labels = ()
+        self.face = None
+        self._proof_images = self.proof_labels = ()
         self.incomplete = self.historical = False
         self.missing_history = False
         self.peak_text = ""
@@ -124,7 +127,8 @@ class _PrintPlate(QtWidgets.QWidget):
 
     def assign(self, record, images, *, historical, style):
         self.record = record
-        self.images = tuple(_qimage(image) for image in images)
+        self.face = _qimage(images[0])
+        self._proof_images = tuple(_qimage(image) for image in images[1:]) if self.show_proofs else ()
         self.historical = historical
         self.face_style = style
         last = record.stamps_ns[-1]
@@ -136,17 +140,31 @@ class _PrintPlate(QtWidgets.QWidget):
         valid = newest[np.isfinite(newest)]
         peak = f"{valid.max():,.1f}".rstrip("0").rstrip(".") if valid.size else "—"
         self.peak_text = f"{self.proof_labels[-1]}峰值 {peak} ADC"
-        history = "三帧响应，" + "、".join(self.proof_labels) if len(images) > 1 else "等待三帧对照"
+        history = "三帧响应，" + "、".join(self.proof_labels) if self.has_proofs else "等待三帧对照"
         if style == "imprint":
-            color_key = ("暖铜增强，青色回落，灰白三帧相近。" if len(images) > 1 else "灰白为单帧印纹。")
+            color_key = ("暖铜增强，青色回落，灰白三帧相近。" if self.has_proofs else "灰白为单帧印纹。")
             if self.missing_history:
                 color_key += "历史缺测的位置使用中性墨。"
         else:
             color_key = "主图按响应强度着色。"
-        scale = f"红色表示达到或超过 {record.span_adc:g} ADC。" if len(images) > 1 or style == "response" else ""
+        scale = f"红色表示达到或超过 {record.span_adc:g} ADC。" if self.has_proofs or style == "response" else ""
         self.setAccessibleDescription(self.caption() + "。" + self.footprint_label() + "。" + color_key
                                       + history + "。" + scale + self.peak_text)
         self.update()
+
+    @property
+    def has_proofs(self):
+        return self.record is not None and len(self.record.frames) == 3
+
+    @property
+    def images(self):
+        """Materialize the complete plate for an explicit proof view or export."""
+        if self.record is None:
+            return ()
+        if self.has_proofs and not self._proof_images:
+            self._proof_images = tuple(_qimage(contact_surface_rgb(field, self.record.span_adc))
+                                       for field in self.record.frames)
+        return (self.face, *self._proof_images)
 
     def caption(self):
         kind = "实时接触"
@@ -170,7 +188,7 @@ class _PrintPlate(QtWidgets.QWidget):
         rect = QtCore.QRectF
         margin = min(28, max(12, width // 24))
         title = min(48, max(30, width // 14))
-        has_proofs = len(self.images) > 1
+        has_proofs = self.has_proofs
         # Only the user's layout choice controls the space available to the main image.
         proof_height = min(188, max(116, height // 3)) if show_proofs else 0
         hero = height - proof_height
@@ -204,7 +222,7 @@ class _PrintPlate(QtWidgets.QWidget):
                                   bounds.height() / ROWS * locator.height()))
         view_top = max(57, title + 19)
         view = rect(margin, view_top, width - 2 * margin, hero - view_top - 55)
-        _draw_exposure(painter, view, self.images[0], bounds)
+        _draw_exposure(painter, view, self.face, bounds)
         if imprint:
             _draw_ink_key(painter, margin, width - 2 * margin, hero - 51, has_proofs, self.missing_history)
         elif not show_proofs:
@@ -359,7 +377,8 @@ class ContactPrintPage(QtWidgets.QWidget):
                 and self.plate.record is not target):
             if self._executor is None:
                 self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="griptile-print")
-            self._work = view, target, self._executor.submit(_render_exposures, target, style)
+            self._work = view, target, self._executor.submit(
+                _render_exposures, target, style, self.plate.show_proofs)
             self._next_preview = monotonic() + self.PREVIEW_INTERVAL
 
     def refresh(self):

@@ -218,3 +218,18 @@ def test_style_fallback_uses_measured_response_and_rejects_unknown_styles():
     np.testing.assert_array_equal(render_contact_face(fields[-1], style="imprint"), master)
     with pytest.raises(ValueError, match="style"):
         render_contact_print(fields, style="unknown")
+
+
+@pytest.mark.parametrize("style", ["imprint", "response"])
+@pytest.mark.parametrize("measured_shape", [False, True])
+def test_face_only_matches_full_print_and_checks_every_exposure(style, measured_shape):
+    fields = np.arange(3 * 400, dtype=np.float32).reshape(3, *SHAPE)
+    fields[0, 8, 3] = fields[2, 13, 2] = np.nan
+    footprint = fields[-1] > 940 if measured_shape else None
+    expected, _ = render_contact_print(fields, footprint=footprint, style=style)
+    face, proofs = render_contact_print(fields, footprint=footprint, style=style, include_proofs=False)
+    assert proofs is None
+    np.testing.assert_array_equal(face, expected)
+    fields[0, 2, 2] = -1
+    with pytest.raises(ValueError, match="nonnegative"):
+        render_contact_print(fields, footprint=footprint, style=style, include_proofs=False)

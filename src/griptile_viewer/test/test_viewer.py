@@ -344,6 +344,51 @@ def test_print_navigation_and_background_capture_share_one_window(open_window, q
     assert {w for w in qt_app.topLevelWidgets() if w.isVisible()} == existing_windows | {window}
 
 
+def test_hidden_array_waits_for_navigation_or_export_without_stalling_load_tool(open_window, tmp_path):
+    from griptile_viewer.window import QtGui
+
+    model = ArrayView(SENSOR)
+    assembler = Assembler(sensor_id=SENSOR)
+    first = snapshot(assembler, 1, START)
+    reference = profile_status()
+    reference.header, reference.direction = first.header, "both"
+    model.accept_reference(reference)
+    model.accept(first, 0)
+    now = 0
+    window = open_window(model, clock_ns=lambda: now)
+    window.open_load_dialog()
+    window.open_contact_print()
+    assert not window.map.isVisible() and window.load_dialog.isVisible()
+    original = window.image.image
+    for i in range(1, 16):
+        now = i * 50_000_000
+        state = snapshot(assembler, i + 1, START + now)
+        field = np.full((20, 20), 100. * i)
+        model.accept(state, now)
+        model.accept_response(response(state, field))
+        window.refresh()
+    assert window.image.image is original
+    assert model.contact_prints.can_snapshot
+    assert "峰值 1500 ADC" in window.load_dialog.live.text()
+
+    # Explicit export while the array is hidden still uses the latest sample.
+    path = tmp_path / "hidden-array.png"
+    window.save_png(path)
+    image = QtGui.QImage(str(path))
+    assert image.pixelColor(150, 150).getRgb()[:3] == tuple(amplitude_rgb(field, 3000.)[0, 0])
+    assert not window.map.isVisible()
+
+    now += 50_000_000
+    state = snapshot(assembler, 17, START + now)
+    field[0, 0] = 2300.
+    model.accept(state, now)
+    model.accept_response(response(state, field))
+    window.contact_print_page.back_button.click()
+    assert window.map.isVisible()
+    np.testing.assert_array_equal(window.image.image, contact_surface_rgb(field, 3000.))
+    assert "峰值 2300 ADC" in window.load_dialog.live.text()
+
+
 def test_contact_print_requires_new_rows_and_native_scalar():
     model = ArrayView(SENSOR)
     assembler = Assembler(sensor_id=SENSOR)

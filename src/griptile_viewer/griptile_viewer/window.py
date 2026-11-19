@@ -318,9 +318,9 @@ class ViewerWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage(str(error), 6000)
 
     def save_png(self, path):
+        self.refresh(render_array=True)
         mode = self.mode.currentIndex()
         if mode in (CONTACT_MODE, SURFACE_MODE):
-            self.refresh()
             if self.equalization.active is None:
                 pixels = self.image.image
             else:
@@ -372,6 +372,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.pages.setCurrentIndex(0)
         self.setWindowTitle(f"GripTile · 触觉显示 · {self.model.sensor_id}")
         self.contact_print_button.setFocus()
+        self.refresh()
 
     def open_equalization_dialog(self):
         if self.model.replay:
@@ -448,7 +449,8 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self._surface_input, self._surface_span, self._surface_thresholds = amplitude, span, thresholds
         return self._surface_pixels
 
-    def refresh(self):
+    def refresh(self, *, render_array=False):
+        """Advance acquisition and active tools; explicitly requested exports also need a fresh array."""
         now = self.clock_ns()
         model = self.model
         model.track_clock(now)
@@ -461,7 +463,19 @@ class ViewerWindow(QtWidgets.QMainWindow):
         if message is not self.last_message:
             self.last_message = message
             self.last_receipt_wall_ns = wall_ns
-        replay_pause = model.replay and wall_ns - self.last_receipt_wall_ns > 1_000_000_000
+        if render_array or self.pages.currentIndex() == 0:
+            replay_pause = model.replay and wall_ns - self.last_receipt_wall_ns > 1_000_000_000
+            self._refresh_array(now, replay_pause)
+        if self.equalization_dialog is not None:
+            self.equalization_dialog.refresh()
+        if self.load_dialog is not None:
+            self.load_dialog.refresh()
+        if self.serial_dialog is not None:
+            self.serial_dialog.refresh_view()
+
+    def _refresh_array(self, now, replay_pause):
+        model = self.model
+        message = model.message
         valid = model.mask(now)
         mode = self.mode.currentIndex()
         delta = mode == DELTA_MODE
@@ -586,9 +600,3 @@ class ViewerWindow(QtWidgets.QMainWindow):
         reason = message.reason if message is not None and not valid.any() else ""
         self.legend.setText("    ".join(filter(None, (model.sensor_id, summary, ref_info, reason, model.diagnostic,
                                                     model.rejection, model.service_error))))
-        if self.equalization_dialog is not None:
-            self.equalization_dialog.refresh()
-        if self.load_dialog is not None:
-            self.load_dialog.refresh()
-        if self.serial_dialog is not None:
-            self.serial_dialog.refresh_view()

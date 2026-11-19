@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
+from griptile_core import contact_print
 from griptile_core.contact_image import CONTACT_COLOR_STOPS, contact_intensity_rgb, SURFACE_SCALE, UNLOADED_RGB
 from griptile_viewer import contact_print_dialog as ui
 from griptile_viewer.print_capture import ContactPrint
@@ -190,11 +191,11 @@ def test_edge_taxel_stays_registered_when_proofs_arrive_and_style_changes(displa
     # can be measured independently of the palette, adjacent ink and Qt text.
     marker = QtGui.QColor("#ff00ff")
 
-    def render(record, style):
+    def render(record, style, include_proofs):
         blank = np.zeros((20 * SURFACE_SCALE, 20 * SURFACE_SCALE, 3), np.uint8)
         face = blank.copy()
         face[-SURFACE_SCALE:, :SURFACE_SCALE] = marker.getRgb()[:3]
-        return (face, blank, blank, blank) if len(record.frames) == 3 else (face,)
+        return (face, blank, blank, blank) if include_proofs and len(record.frames) == 3 else (face,)
 
     def painted_taxel():
         boxes = []
@@ -224,8 +225,17 @@ def test_edge_taxel_stays_registered_when_proofs_arrive_and_style_changes(displa
     assert painted_taxel() == expected
 
 
-def test_proof_strip_only_opens_on_request_and_exports_all_three_frames(display, qt_app, tmp_path):
+def test_proof_strip_only_opens_on_request_and_exports_all_three_frames(display, qt_app, tmp_path, monkeypatch):
     page, capture = display
+    renders = []
+    surface = contact_print.contact_surface_rgb
+
+    def count_surface(field, span):
+        renders.append(field)
+        return surface(field, span)
+
+    monkeypatch.setattr(contact_print, "contact_surface_rgb", count_surface)
+    monkeypatch.setattr(ui, "contact_surface_rgb", count_surface)
     # Distinct uniform responses make each exposure recognizable in the actual window and PNG.
     levels = (300, 1500, 2700)
     fields = tuple(np.full((20, 20), level, dtype=np.float32) for level in levels)
@@ -263,8 +273,15 @@ def test_proof_strip_only_opens_on_request_and_exports_all_three_frames(display,
     _settle(page, triplet, qt_app)
     expect_closed()
     path = tmp_path / "proofs.png"
+    assert not renders
     page.save_png(path)
-    expect_proofs(QtGui.QImage(str(path)))
+    saved = QtGui.QImage(str(path))
+    expect_proofs(saved)
+    assert len(renders) == 3
+    page.proofs_checkbox.click()
+    qt_app.processEvents()
+    assert page.plate.export_image() == saved and len(renders) == 3
+    page.proofs_checkbox.click()
     page.history_button.click()
     capture.press(triplet)
     _settle(page, triplet, qt_app)
@@ -273,6 +290,7 @@ def test_proof_strip_only_opens_on_request_and_exports_all_three_frames(display,
     page.proofs_checkbox.click()
     qt_app.processEvents()
     expect_proofs(page.plate.grab().toImage())
+    assert len(renders) == 6
     page.proofs_checkbox.click()
     qt_app.processEvents()
     expect_closed()
@@ -308,10 +326,10 @@ def test_stale_render_cannot_replace_new_stream_and_unchanged_print_is_cached(
     release = Event()
     render = ui.render_contact_print
 
-    def slow(frames, span, footprint, *, style):
+    def slow(frames, span, footprint, **options):
         jobs.append(id(frames))
         assert release.wait(4)
-        return render(frames, span, footprint, style=style)
+        return render(frames, span, footprint, **options)
 
     monkeypatch.setattr(ui, "render_contact_print", slow)
     try:
@@ -390,10 +408,10 @@ def test_replacing_live_segment_discards_in_flight_preview_without_an_intervenin
     blocker = Event()
     render = ui.render_contact_print
 
-    def render_after_release(frames, span, footprint, *, style):
+    def render_after_release(frames, span, footprint, **options):
         if frames is first.frames:
             assert blocker.wait(4)
-        return render(frames, span, footprint, style=style)
+        return render(frames, span, footprint, **options)
 
     monkeypatch.setattr(ui, "render_contact_print", render_after_release)
     try:
@@ -418,11 +436,11 @@ def test_style_switch_rejects_old_render_and_exports_selected_style(display, qt_
     render = ui.render_contact_print
     styles = []
 
-    def slow_ink(frames, span, footprint, *, style):
+    def slow_ink(frames, span, footprint, *, style, **options):
         styles.append(style)
         if style == "imprint":
             assert blocker.wait(4)
-        return render(frames, span, footprint, style=style)
+        return render(frames, span, footprint, style=style, **options)
 
     monkeypatch.setattr(ui, "render_contact_print", slow_ink)
     try:

@@ -4,7 +4,7 @@ import numpy as np
 
 from .contact_image import (
     CONTACT_OUTLINE_RGB, DEFAULT_CONTACT_SPAN, INVALID_RGB, SURFACE_SCALE, UNLOADED_RGB,
-    _bilinear, contact_surface_rgb, footprint_surface,
+    _bilinear, _check_field, _check_response, _check_span, contact_surface_rgb, footprint_surface,
 )
 from .grid import SHAPE
 
@@ -99,16 +99,17 @@ def _imprint(fields, span_adc, inside, outline):
     return face
 
 
-def _contact_face(fields, rgb, span_adc, footprint, style):
+def _contact_face(fields, span_adc, footprint, style, latest_rgb=None):
     if style not in ("imprint", "response"):
         raise ValueError("contact print style must be imprint or response")
-    if footprint is None:
-        return rgb.copy()
     valid = np.isfinite(fields[-1])
-    inside, outline = footprint_surface(footprint, valid)
-    if style == "imprint":
-        return _imprint(fields, span_adc, inside, outline)
-    face = rgb.copy()
+    if footprint is not None:
+        inside, outline = footprint_surface(footprint, valid)
+        if style == "imprint":
+            return _imprint(fields, span_adc, inside, outline)
+    face = contact_surface_rgb(fields[-1], span_adc) if latest_rgb is None else latest_rgb.copy()
+    if footprint is None:
+        return face
     outside = ~inside
     if not valid.all():
         outside &= valid.repeat(SURFACE_SCALE, axis=0).repeat(SURFACE_SCALE, axis=1)
@@ -119,22 +120,28 @@ def _contact_face(fields, rgb, span_adc, footprint, style):
 
 def render_contact_face(field, span_adc=DEFAULT_CONTACT_SPAN, footprint=None, *, style="response"):
     """Render a single measured contact face in response colors or neutral engraved ink."""
-    rgb = contact_surface_rgb(field, span_adc)
-    return _contact_face((field,), rgb, span_adc, footprint, style)
+    _check_span(span_adc)
+    return _contact_face((_check_field(field),), span_adc, footprint, style)
 
 
-def render_contact_print(frames, span_adc=DEFAULT_CONTACT_SPAN, footprint=None, *, style="response"):
-    """Show a contact face and three unmodified, chronological RGB response maps.
+def render_contact_print(frames, span_adc=DEFAULT_CONTACT_SPAN, footprint=None, *,
+                         style="response", include_proofs=True):
+    """Show a contact face and optionally three chronological RGB response maps.
 
     In imprint style the three exposures also color the engraved contours inside
     the latest measured footprint. In response style only the latest frame
     colors the face. Without a footprint both styles fall back to the latest
     RGB response. Each input is a 20×20 noise-gated ADC field. NaN is unknown.
-    All output images are row-major 300×300 RGB.
+    All output images are row-major 300×300 RGB. With include_proofs=False
+    the second result is None; the engraved face still uses all three exposures.
     """
     fields = np.asarray(frames)
     if fields.shape != (3, *SHAPE) or fields.dtype.kind not in "iuf":
         raise ValueError("a contact print needs three numeric 20x20 response fields")
 
-    proofs = np.stack([contact_surface_rgb(field, span_adc) for field in fields])
-    return _contact_face(fields, proofs[-1], span_adc, footprint, style), proofs
+    if include_proofs:
+        proofs = np.stack([contact_surface_rgb(field, span_adc) for field in fields])
+        return _contact_face(fields, span_adc, footprint, style, proofs[-1]), proofs
+    _check_span(span_adc)
+    _check_response(fields)
+    return _contact_face(fields, span_adc, footprint, style), None
