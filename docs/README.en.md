@@ -51,6 +51,12 @@ ros2 service call /tactile/sensor_0/set_contact_reference griptile_msgs/srv/SetC
 
 ### See the shape of the contact footprint
 
+Open the live contact print at startup with the command below. The main window also opens for serial settings and unloaded reference controls. The same option works with `replay.launch.py` for recorded data.
+
+```bash
+ros2 launch griptile_driver sensor.launch.py imprint:=true
+```
+
 Click **触印** beside the GripTile name. The default print uses a black ground. A single observation produces a neutral impression. Once three exposures are available, their equal-response lines are registered inside the latest measured footprint. Copper highlights growing responses, cyan highlights receding responses, and aligned impressions approach ivory. The latest observation determines the outer edges and holes. Separate patches stay separate and the live print clears on release. Clear **放大接触区** to locate the imprint on the full array.
 
 Once sufficient observations are available, three color panels show the responses about 600 ms ago, 300 ms ago and at the latest sample, with the same crop and color scale. These panels include weak readings outside the detected footprint and help explain how its shape and strength change during loading and release.

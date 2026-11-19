@@ -19,7 +19,6 @@ def generate_launch_description():
         DeclareLaunchArgument("sensor_id", default_value="sensor_0"),
         DeclareLaunchArgument("source_namespace", default_value=["/tactile/", sensor_id]),
         DeclareLaunchArgument("namespace", default_value="/tactile/replay"),
-        DeclareLaunchArgument("gui", default_value="false"),
         DeclareLaunchArgument("max_cell_age_ms", default_value="100.0"),
         DeclareLaunchArgument("state_rate_hz", default_value="30.0"),
         Node(package="griptile_driver", executable="griptile_replay", namespace=output,
@@ -35,5 +34,5 @@ def generate_launch_description():
         Node(package="griptile_viewer", executable="viewer", namespace=output, output="screen",
              condition=IfCondition(LaunchConfiguration("gui")),
              remappings=[("diagnostics", [source, "/diagnostics"])],
-             parameters=[identity]),
+             parameters=[identity, {"imprint": ParameterValue(LaunchConfiguration("imprint"), value_type=bool)}]),
     ])

@@ -22,7 +22,6 @@ def generate_launch_description():
         DeclareLaunchArgument("publish_heatmap", default_value="false"),
         DeclareLaunchArgument("state_rate_hz", default_value="30.0"),
         DeclareLaunchArgument("max_cell_age_ms", default_value="100.0"),
-        DeclareLaunchArgument("gui", default_value="false"),
         Node(package="griptile_driver", executable="griptile_node", namespace=namespace,
              output="screen", parameters=[{
                  **identity,
@@ -34,5 +33,6 @@ def generate_launch_description():
                  "max_cell_age_ms": ParameterValue(LaunchConfiguration("max_cell_age_ms"), value_type=float),
              }]),
         Node(package="griptile_viewer", executable="viewer", namespace=namespace, output="screen",
-             condition=IfCondition(LaunchConfiguration("gui")), parameters=[identity]),
+             condition=IfCondition(LaunchConfiguration("gui")),
+             parameters=[identity, {"imprint": ParameterValue(LaunchConfiguration("imprint"), value_type=bool)}]),
     ])

@@ -1,4 +1,4 @@
-"""Contact image launch settings shared by acquisition and replay."""
+"""Contact image and viewer launch settings shared by acquisition and replay."""
 
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
@@ -9,6 +9,10 @@ from griptile_core.contact_image import DEFAULT_CONTACT_SPAN
 
 def arguments():
     return [
+        DeclareLaunchArgument("imprint", default_value="false",
+                              description="Start the viewer with the live contact print open"),
+        DeclareLaunchArgument("gui", default_value=LaunchConfiguration("imprint"),
+                              description="Open the viewer (defaults to the imprint setting)"),
         DeclareLaunchArgument("contact_span_adc", default_value=str(DEFAULT_CONTACT_SPAN),
                               description="Noise-gated ADC response at full red"),
         DeclareLaunchArgument("contact_direction", default_value="both",

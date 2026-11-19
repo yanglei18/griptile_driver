@@ -24,6 +24,7 @@ class ViewerNode(Node):
     def __init__(self):
         super().__init__("griptile_viewer")
         sensor_id = self.declare_parameter("sensor_id", "sensor_0").value
+        self.open_imprint = self.declare_parameter("imprint", False).value
         replay = self.get_parameter("use_sim_time").value
         self.model = ArrayView(sensor_id, replay=replay)
         self.view_clock = (lambda: self.get_clock().now().nanoseconds) if replay else time.monotonic_ns
@@ -127,6 +128,8 @@ def main(args=None):
         executor.add_node(node)
         window = ViewerWindow(node.model, node.view_clock, node.request_reference, serial_control=node.serial_control)
         window.show()
+        if node.open_imprint:
+            window.open_contact_print()
         ros_timer = QtCore.QTimer()
 
         def poll():

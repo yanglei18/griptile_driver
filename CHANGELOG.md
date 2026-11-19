@@ -7,6 +7,7 @@
 - Render the latest contact print and its three source-timed exposures on the same acquisition-bound RGB response scale, with a labeled color legend and an unclipped peak readout.
 - Show the contact footprint from the first supported observation. Trace each patch and its holes from noise-referenced native taxels, with three full response maps for comparison once the time history is available.
 - Use a dark three-exposure imprint as the default contact print, with copper, cyan and ivory lines confined to the current measured footprint. Keep the calibrated color map available for viewing and export.
+- Open directly on the contact print in live and replay sessions with `imprint:=true`.
 
 - Extract the 44-byte, 20-column sensor protocol, serial ownership and rolling ADC grid into a standalone package.
 - Introduce sensor-scoped ROS 2 interfaces for raw rows, state, diagnostics and source metadata.
