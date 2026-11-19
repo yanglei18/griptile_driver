@@ -143,10 +143,20 @@ def contact_surface_rgb(amplitude, span) -> np.ndarray:
     return _color_response(smooth, visible, inside, span)
 
 
-def _connected_contact_mask(amplitude, thresholds, valid):
-    """Retain weak taxels reachable from a strong taxel through shared sides."""
-    weak = valid & (amplitude >= CONTACT_SUPPORT_RATIO * thresholds)
-    region = valid & (amplitude >= CONTACT_SEED_RATIO * thresholds)
+def _contact_region(amplitude, thresholds, active_taxels):
+    values = _check_field(amplitude)
+    thresholds = np.asarray(thresholds, dtype=float)
+    if thresholds.shape != values.shape:
+        raise ValueError("contact thresholds must have the native 20x20 grid shape")
+    valid = np.isfinite(values) & np.isfinite(thresholds) & (thresholds > 0)
+    weak = valid & (values >= CONTACT_SUPPORT_RATIO * thresholds)
+    region = valid & (values >= CONTACT_SEED_RATIO * thresholds)
+    if active_taxels is not None:
+        seeds = np.asarray(active_taxels)
+        if seeds.shape != values.shape or seeds.dtype != np.bool_:
+            raise ValueError("active taxels must be a boolean 20x20 grid")
+        region |= seeds & weak
+
     while region.any():
         expanded = region.copy()
         expanded[1:] |= region[:-1]
@@ -157,12 +167,52 @@ def _connected_contact_mask(amplitude, thresholds, valid):
         if np.array_equal(expanded, region):
             break
         region = expanded
+    return region, valid
+
+
+def contact_footprint(amplitude, thresholds, active_taxels=None):
+    """Measured taxels connected by shared sides to a strong or still-active taxel.
+
+    Supply the acquisition response and its own reference thresholds before any
+    display equalization. Previously activated taxels must still meet the lower
+    support threshold in this frame. Missing taxels never connect two regions.
+    """
+    region, _ = _contact_region(amplitude, thresholds, active_taxels)
     return region
 
 
 def _all_four_neighbors(mask):
     """True where all four side neighbors of an interior pixel are true."""
     return mask[:-2, 1:-1] & mask[2:, 1:-1] & mask[1:-1, :-2] & mask[1:-1, 2:]
+
+
+def footprint_surface(region, valid):
+    """Rasterize a native footprint and its measured boundary on the display grid.
+
+    Half-coverage between neighboring taxel centers defines the displayed area.
+    Along unknown cells, keep the nearest measurement and omit the adjoining
+    boundary. The array edge clips the view without implying an object edge.
+    """
+    region = np.asarray(region)
+    valid = np.asarray(valid)
+    if any(mask.dtype != np.bool_ or mask.shape != (ROWS, COLS) for mask in (region, valid)):
+        raise ValueError("footprint and validity must be boolean 20x20 grids")
+    region = region & valid
+    if not region.any() or region.all():
+        size = ROWS * SURFACE_SCALE, COLS * SURFACE_SCALE
+        return np.full(size, region[0, 0], dtype=bool), np.zeros(size, dtype=bool)
+    inside = _bilinear(region) >= 0.5
+    outline = np.zeros_like(inside)
+    supported = None
+    if not valid.all():
+        supported = _bilinear(~valid) == 0
+        missing_rows, missing_cols = np.nonzero(~supported)
+        inside[missing_rows, missing_cols] = region[missing_rows // SURFACE_SCALE, missing_cols // SURFACE_SCALE]
+    boundary = inside[1:-1, 1:-1] & ~_all_four_neighbors(inside)
+    if supported is not None:
+        boundary &= supported[1:-1, 1:-1] & _all_four_neighbors(supported)
+    outline[1:-1, 1:-1] = boundary
+    return inside, outline
 
 
 def surface_contact_outline(amplitude, contour_thresholds) -> np.ndarray:
@@ -173,20 +223,6 @@ def surface_contact_outline(amplitude, contour_thresholds) -> np.ndarray:
     marks an unsupported reference. The caller must pair it with the measured
     response from the same acquisition. No previous frames or color span enter.
     """
-    values = _check_field(amplitude)
-    thresholds = np.asarray(contour_thresholds, dtype=float)
-    if thresholds.shape != values.shape:
-        raise ValueError("contour thresholds must have the native 20x20 grid shape")
-    valid = np.isfinite(values) & np.isfinite(thresholds) & (thresholds > 0)
-    region = _connected_contact_mask(values, thresholds, valid)
-    outline = np.zeros((ROWS * SURFACE_SCALE, COLS * SURFACE_SCALE), dtype=bool)
-    if region.any() and not region.all():
-        inside = _bilinear(region) >= 0.5
-        boundary = inside[1:-1, 1:-1] & ~_all_four_neighbors(inside)
-        if not valid.all():
-            # A missing corner makes its interpolation neighborhood unknown.
-            # Suppress the adjoining edge as well, so a dropout cannot outline a hole.
-            supported = _bilinear(~valid) == 0
-            boundary &= supported[1:-1, 1:-1] & _all_four_neighbors(supported)
-        outline[1:-1, 1:-1] = boundary
+    region, valid = _contact_region(amplitude, contour_thresholds, None)
+    _, outline = footprint_surface(region, valid)
     return outline

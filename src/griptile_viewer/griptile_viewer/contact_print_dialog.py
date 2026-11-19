@@ -7,7 +7,7 @@ import numpy as np
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from griptile_core.contact_image import CONTACT_COLOR_STOPS
-from griptile_core.contact_print import CONTOUR_FRACTIONS, render_contact_print
+from griptile_core.contact_print import render_contact_face, render_contact_print
 from griptile_core.grid import COLS, ROWS
 
 
@@ -18,9 +18,11 @@ SUBTLE = QtGui.QColor("#62675f")
 FULL_ARRAY = QtCore.QRect(0, 0, COLS, ROWS)
 
 
-def _contact_bounds(frames, span_adc):
-    # All three exposures share a crop at the first visible contour level.
-    rows, cols = np.nonzero(np.any(np.asarray(frames) >= CONTOUR_FRACTIONS[0] * span_adc, axis=0))
+def _contact_bounds(footprints):
+    # Include every measured contact in the three source times, even a weak rim.
+    if footprints is None:
+        return FULL_ARRAY
+    rows, cols = np.nonzero(np.any(footprints, axis=0))
     if not len(rows):
         return FULL_ARRAY
     area = QtCore.QRect(QtCore.QPoint(int(cols.min()), int(rows.min())),
@@ -32,6 +34,14 @@ def _qimage(pixels):
     data = np.ascontiguousarray(pixels)
     return QtGui.QImage(data.data, data.shape[1], data.shape[0],
                         data.strides[0], QtGui.QImage.Format_RGB888).copy()
+
+
+def _render_exposures(record):
+    footprint = record.footprints[-1] if record.footprints is not None else None
+    if len(record.frames) == 1:
+        return (render_contact_face(record.frames[-1], record.span_adc, footprint),)
+    face, proofs = render_contact_print(record.frames, record.span_adc, footprint)
+    return (face, *proofs)
 
 
 def _font(size, *, serif=False):
@@ -82,7 +92,7 @@ class _PrintPlate(QtWidgets.QWidget):
         self.empty_text = "等待有效读数"
         self.zoomed = True
         self.setMinimumSize(300, 320)
-        self.setAccessibleName("触印与三张单帧响应图")
+        self.setAccessibleName("接触面与三帧响应")
 
     def clear(self, message):
         if self.record is None and self.empty_text == message and self.accessibleDescription() == message:
@@ -99,7 +109,7 @@ class _PrintPlate(QtWidgets.QWidget):
     def assign(self, record, images, *, historical):
         self.record = record
         self.images = tuple(_qimage(image) for image in images)
-        self.bounds = _contact_bounds(record.frames, record.span_adc)
+        self.bounds = _contact_bounds(record.footprints)
         self.historical = historical
         last = record.stamps_ns[-1]
         self.proof_labels = tuple(f"{round((last - t) / 1_000_000)} 毫秒前"
@@ -109,8 +119,8 @@ class _PrintPlate(QtWidgets.QWidget):
         valid = newest[np.isfinite(newest)]
         peak = f"{valid.max():,.1f}".rstrip("0").rstrip(".") if valid.size else "—"
         self.peak_text = f"{self.proof_labels[-1]}峰值 {peak} ADC"
-        self.setAccessibleDescription(self.caption() + "。" + "、".join(self.proof_labels)
-                                      + "。主图与三帧共用响应色标。"
+        history = "三帧响应，" + "、".join(self.proof_labels) if len(images) > 1 else "等待三帧对照"
+        self.setAccessibleDescription(self.caption() + "。" + self.footprint_label() + "。" + history + "。"
                                       + f"红色表示达到或超过 {record.span_adc:g} ADC。"
                                       + self.peak_text)
         self.update()
@@ -120,6 +130,11 @@ class _PrintPlate(QtWidgets.QWidget):
         if self.historical:
             kind = "历史留印 · " + ("自动留印" if self.record.automatic else "手动留印")
         return kind + (" · 已均衡" if self.record.equalized else "")
+
+    def footprint_label(self):
+        if self.record.footprints is None:
+            return "接触范围待测"
+        return f"{np.count_nonzero(self.record.footprints[-1])} 个接触测点"
 
     def paintEvent(self, event):
         painter = QtGui.QPainter(self)
@@ -132,15 +147,21 @@ class _PrintPlate(QtWidgets.QWidget):
         rect = QtCore.QRectF
         margin = min(28, max(12, width // 24))
         title = min(48, max(30, width // 14))
-        proof_height = min(188, max(116, height // 3))
+        has_proofs = len(self.images) > 1
+        proof_height = min(188, max(116, height // 3)) if has_proofs else 65
         hero = height - proof_height
         painter.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, not self.incomplete)
         painter.fillRect(rect(0, 0, width, height), GROUND)
-        _text(painter, rect(margin, 7, width / 2, title + 12), "触印", PAPER, title, serif=True)
+        has_shape = self.record is None or self.record.footprints is not None
+        heading = "接触面" if has_shape else "响应图"
+        _text(painter, rect(margin, 7, width / 2, title + 12), heading, PAPER, title, serif=True)
+        if self.record is not None:
+            _text(painter, rect(margin + 3 * title + 7, 8, 120, title + 12),
+                  self.footprint_label(), QtGui.QColor("#c9c7bc"), 13)
         _text(painter, rect(width / 2, 9, width / 2 - margin, 30),
               "GripTile", PAPER, min(24, title - 8), serif=True, right=True)
         _text(painter, rect(width / 2, 37, width / 2 - margin, 18),
-              "20 × 20", QtGui.QColor("#b6b9af"), 12, right=True)
+              "触印 · 20 × 20", QtGui.QColor("#b6b9af"), 12, right=True)
         if self.record is None:
             painter.setFont(_font(16))
             painter.setPen(QtGui.QColor("#abafa8"))
@@ -151,14 +172,14 @@ class _PrintPlate(QtWidgets.QWidget):
         tile_h = max(24, proof_height - 85)
         gap = max(6, margin // 2)
         tile_w = (width - 2 * margin - 2 * gap) / 3
-        proof_note = "同一位置 · 从早到晚"
+        proof_note = "三帧响应" if has_proofs else "等待三帧对照"
         if self.incomplete:
-            proof_note = "灰色区域为缺测"
+            proof_note += " · 灰色为缺测"
         _text(painter, rect(margin, hero + 4, width - 2 * margin, 22), proof_note, INK, 13)
         _text(painter, rect(margin, hero + 4, width - 2 * margin, 22),
               self.peak_text, INK, 12, right=True)
         bounds = self.bounds if self.zoomed else FULL_ARRAY
-        if bounds != FULL_ARRAY:
+        if bounds != FULL_ARRAY and width >= 380:
             # Locator shows the selected region in the full physical array.
             locator = rect(width - margin - 130, 17, 33, 33)
             painter.setPen(QtGui.QColor("#586264"))
@@ -176,11 +197,11 @@ class _PrintPlate(QtWidgets.QWidget):
                    if bounds != FULL_ARRAY else "全阵列")
         _text(painter, rect(width / 2, hero - 29, width / 2 - margin, 21),
               address, QtGui.QColor("#b6b9af"), 12, right=True)
-        for i in range(3):
+        for i, image in enumerate(self.images[1:]):
             x = margin + i * (tile_w + gap)
             tile = rect(x, tile_top, tile_w, tile_h)
             painter.fillRect(tile, GROUND)
-            _draw_exposure(painter, tile, self.images[i + 1], bounds)
+            _draw_exposure(painter, tile, image, bounds)
             _text(painter, rect(x, tile_top + tile_h + 1, tile_w, 18),
                   self.proof_labels[i], INK, 12)
         _draw_response_scale(painter, margin, width - 2 * margin, height - 4, self.record.span_adc)
@@ -269,34 +290,29 @@ class ContactPrintDialog(QtWidgets.QDialog):
         self._work = None
         super().closeEvent(event)
 
-    def _update_plate(self, view, ready, empty):
+    def _update_plate(self, view, target, empty):
         """Render one frame at a time. A result only belongs to its source contact or saved print."""
-        historical, source = view
+        historical = view[0]
         if view != self._view:
             self._view, self._error, self._next_preview = view, "", 0.
             self.plate.clear(empty)
-        elif self.plate.record is None or (not historical and not ready):
+        elif target is None or (self.plate.record is not None and len(self.plate.record.frames) > len(target.frames)):
             self.plate.clear(empty)
         if self._work is not None and self._work[2].done():
             work_view, record, future = self._work
             self._work = None
-            if work_view == view and (historical or ready):
+            if work_view == view and target is not None and len(record.frames) == len(target.frames):
                 try:
-                    master, proofs = future.result()
-                    self.plate.assign(record, (master, *proofs), historical=historical)
+                    self.plate.assign(record, future.result(), historical=historical)
                 except (ValueError, RuntimeError) as error:
                     self._error = str(error)
-        target = None
-        if self._work is None and not self._error:
-            if historical:
-                target = source
-            elif ready and monotonic() >= self._next_preview:
-                target = self.capture.preview()
-                self._next_preview = monotonic() + self.PREVIEW_INTERVAL
-        if target is not None and self.plate.record is not target:
+        due = historical or monotonic() >= self._next_preview
+        if (self._work is None and not self._error and due and target is not None
+                and self.plate.record is not target):
             if self._executor is None:
                 self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="griptile-print")
-            self._work = view, target, self._executor.submit(render_contact_print, target.frames, target.span_adc)
+            self._work = view, target, self._executor.submit(_render_exposures, target)
+            self._next_preview = monotonic() + self.PREVIEW_INTERVAL
 
     def refresh(self):
         if not self.isVisible():
@@ -306,7 +322,7 @@ class ContactPrintDialog(QtWidgets.QDialog):
             self.history_button.setChecked(False)
         historical = self.history_button.isChecked()
         present = capture.contact_present
-        ready = capture.can_snapshot
+        target = capture.latest if historical else capture.live_preview()
         if historical:
             empty = "正在载入历史留印"
         elif present is None:
@@ -314,11 +330,11 @@ class ContactPrintDialog(QtWidgets.QDialog):
         elif not present:
             empty = "无接触"
         else:
-            empty = "正在生成当前触印" if ready else "已检测到接触 · 等待连续读数"
-        self._update_plate((historical, capture.latest if historical else capture.contact_id), ready, empty)
+            empty = "正在显示接触面"
+        self._update_plate((historical, capture.latest if historical else capture.contact_id), target, empty)
         self.history_button.setEnabled(capture.latest is not None)
         self.history_button.setText("返回实时" if historical else "上次留印")
-        self.shutter_button.setEnabled(ready and not historical)
+        self.shutter_button.setEnabled(not historical and capture.can_snapshot)
         self.export_button.setEnabled(historical and self.plate.record is not None)
         self.zoom.setEnabled(self.plate.record is not None and self.plate.bounds != FULL_ARRAY)
         if self._error:

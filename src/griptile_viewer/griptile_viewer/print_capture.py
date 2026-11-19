@@ -6,26 +6,30 @@ from numbers import Integral
 
 import numpy as np
 
-from griptile_core.contact_image import CONTACT_SEED_RATIO, CONTACT_SUPPORT_RATIO, DEFAULT_CONTACT_SPAN
+from griptile_core.contact_image import (
+    CONTACT_SEED_RATIO, CONTACT_SUPPORT_RATIO, DEFAULT_CONTACT_SPAN, contact_footprint,
+)
 from griptile_core.equalization import apply_equalization
 from griptile_core.grid import SHAPE
 
 
 @dataclass(frozen=True, eq=False)
 class ContactPrint:
-    """Three retained display-response grids in chronological order, with real source stamps."""
+    """Source-timed response maps and footprints. A saved print has three exposures."""
 
     stamps_ns: tuple
     frames: tuple
     automatic: bool
     equalized: bool
     span_adc: float = DEFAULT_CONTACT_SPAN
+    footprints: tuple | None = None
 
 
 @dataclass(frozen=True, eq=False)
 class _Sample:
     stamp_ns: int
     field: np.ndarray
+    footprint: np.ndarray
     # Sum of retained, noise-relative per-taxel evidence before equalization.
     # Missing evidence is deliberately different from an observed absence of strong contact.
     strength: float | None
@@ -114,11 +118,15 @@ class ContactPrintCapture:
             strength = float(np.sum(relative, where=self._active_taxels, dtype=np.float64))
         else:
             field = np.where(valid, field, np.nan)
+        # Determine the shape in sensor units. Display gains may change its
+        # colors; they cannot add or remove contact from an archived exposure.
+        footprint = contact_footprint(field, thresholds, self._active_taxels)
         if profile is not None:
             field = apply_equalization(field, profile)
         # Bytes-backed storage cannot be mutated by the subscriber or presentation code.
         stored = np.frombuffer(field.tobytes(), dtype=np.float32).reshape(SHAPE)
-        self._samples.append(_Sample(stamp_ns, stored, strength))
+        stored_footprint = np.frombuffer(footprint.tobytes(), dtype=np.bool_).reshape(SHAPE)
+        self._samples.append(_Sample(stamp_ns, stored, stored_footprint, strength))
         oldest = stamp_ns - self.HISTORY_NS
         while self._samples[0].stamp_ns < oldest:
             self._samples.popleft()
@@ -134,27 +142,34 @@ class ContactPrintCapture:
         middle_sample = min(self._samples, key=lambda s: abs(s.stamp_ns - middle))
         return (first_sample, middle_sample, end)
 
-    def preview(self):
-        """Current registered exposures, bounded by the preceding contact and independent of saved prints."""
+    def live_preview(self):
+        """Show the current contact face as soon as it is measured; add history when available."""
         if self.contact_present is not True:
             return None
         if self._preview is None:
-            triplet = self._triplet(self._samples[-1])
-            if triplet is None or (self._preview_since is not None and triplet[0].stamp_ns < self._preview_since):
-                return None
-            supported = np.logical_and.reduce([np.isfinite(s.field) for s in triplet])
-            if not (supported & self._active_taxels).any():
-                return None
-            self._preview = self._print(triplet, automatic=False)
+            current = self._samples[-1]
+            exposures = (current,)
+            triplet = self._triplet(current)
+            if triplet and (self._preview_since is None or triplet[0].stamp_ns >= self._preview_since):
+                supported = np.logical_and.reduce([np.isfinite(s.field) for s in triplet])
+                if (supported & self._active_taxels).any():
+                    exposures = triplet
+            self._preview = self._print(exposures, automatic=False)
         return self._preview
+
+    def preview(self):
+        """Return the complete, time-registered print currently available to the shutter."""
+        record = self.live_preview()
+        return record if record is not None and len(record.frames) == 3 else None
 
     @property
     def can_snapshot(self):
         return self.preview() is not None
 
-    def _print(self, triplet, *, automatic):
-        return ContactPrint(tuple(s.stamp_ns for s in triplet), tuple(s.field for s in triplet),
-                            automatic, self._profile is not None, self._span_adc)
+    def _print(self, exposures, *, automatic):
+        return ContactPrint(tuple(s.stamp_ns for s in exposures), tuple(s.field for s in exposures),
+                            automatic, self._profile is not None, self._span_adc,
+                            footprints=tuple(s.footprint for s in exposures))
 
     def snapshot(self):
         """Capture the most recent three exposures on operator request."""

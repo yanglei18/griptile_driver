@@ -1,3 +1,4 @@
+from dataclasses import replace
 from threading import Event
 from time import monotonic, sleep
 
@@ -20,14 +21,15 @@ class _Capture:
 
     def press(self, record):
         self.live = record
-        self.contact_present = self.can_snapshot = True
+        self.contact_present = True
+        self.can_snapshot = len(record.frames) == 3
         self.contact_id = object()
 
     def release(self):
         self.live = self.contact_id = None
         self.contact_present = self.can_snapshot = False
 
-    def preview(self):
+    def live_preview(self):
         return self.live
 
     def snapshot(self):
@@ -55,7 +57,7 @@ def _sample(*, automatic=False, span_adc=3000):
     frames[1, 7, 5] = 1500
     frames[2, 7, 4] = 2600
     return ContactPrint((1_000_000_000, 1_301_000_000, 1_600_000_000),
-                        tuple(frames), automatic, False, span_adc=span_adc)
+                        tuple(frames), automatic, False, span_adc=span_adc, footprints=tuple(frames > 0))
 
 
 def _settle(window, record, qt_app):
@@ -90,6 +92,8 @@ def test_manual_capture_actual_timing_shared_crop_resize_and_export(display, qt_
     _settle(window, record, qt_app)
     assert window.plate.proof_labels[-1] == "取印时" and window.plate.historical
     assert "299 毫秒前" in window.plate.accessibleDescription()
+    assert "1 个接触测点" in window.plate.accessibleDescription()
+    assert "三帧响应" in window.plate.accessibleDescription()
     assert "2,600 ADC" in window.plate.peak_text and "2000 ADC" in window.plate.accessibleDescription()
     assert window.plate.bounds == QtCore.QRect(0, 5, 8, 8)
     assert window.export_button.isEnabled() and window.zoom.isEnabled()
@@ -125,6 +129,53 @@ def test_manual_capture_actual_timing_shared_crop_resize_and_export(display, qt_
     assert window.plate.record is None and not window.plate.images and window.plate.empty_text == "无接触"
 
 
+def test_crop_and_contact_count_follow_support_while_proofs_keep_weak_responses(display, qt_app):
+    window, capture = display
+    base = _sample()
+    frames = np.array(base.frames)
+    # The support on a dim cell can be reliable while stronger residuals elsewhere are not.
+    frames[0, 15, 4] = 90.
+    frames[2, 0, 19] = 700.
+    masks = np.array(base.footprints)
+    masks[0, 15, 4] = True
+    shaped = replace(base, frames=tuple(frames), footprints=tuple(masks))
+    capture.press(shaped)
+    _settle(window, shaped, qt_app)
+    assert window.plate.bounds == QtCore.QRect(0, 5, 8, 13)  # Includes the earlier weak contact.
+    assert window.plate.footprint_label() == "1 个接触测点"
+    x, y = 19 * SURFACE_SCALE + SURFACE_SCALE // 2, SURFACE_SCALE // 2
+    master, _, _, latest = window.plate.images
+    assert latest.pixelColor(x, y).getRgb()[:3] == contact_intensity_rgb(700, shaped.span_adc)
+    assert master.pixelColor(x, y).getRgb()[:3] == UNLOADED_RGB
+
+    unknown = replace(shaped, footprints=None)
+    capture.press(unknown)
+    _settle(window, unknown, qt_app)
+    assert not window.zoom.isEnabled() and window.plate.bounds == ui.FULL_ARRAY
+    assert "接触范围待测" in window.plate.accessibleDescription()
+    assert window.plate.images[0].pixelColor(x, y) == latest.pixelColor(x, y)
+
+
+def test_first_frame_shows_its_face_before_three_exposures_exist(display, qt_app):
+    window, capture = display
+    triplet = _sample()
+    first = replace(triplet, stamps_ns=triplet.stamps_ns[:1], frames=triplet.frames[:1],
+                    footprints=triplet.footprints[:1])
+    capture.press(first)
+    _settle(window, first, qt_app)
+    assert len(window.plate.images) == 1 and window.plate.proof_labels == ("此刻",)
+    assert "等待三帧对照" in window.plate.accessibleDescription()
+    assert window.plate.footprint_label() == "1 个接触测点"
+    assert not window.shutter_button.isEnabled() and not window.export_button.isEnabled()
+    capture.live = triplet
+    capture.can_snapshot = True
+    _settle(window, triplet, qt_app)
+    assert len(window.plate.images) == 4 and window.shutter_button.isEnabled()
+    capture.release()
+    window.refresh()
+    assert not window.plate.images and window.plate.empty_text == "无接触"
+
+
 def test_stale_render_cannot_replace_new_stream_and_unchanged_print_is_cached(
         display, qt_app, monkeypatch):
     window, capture = display
@@ -134,10 +185,10 @@ def test_stale_render_cannot_replace_new_stream_and_unchanged_print_is_cached(
     release = Event()
     render = ui.render_contact_print
 
-    def slow(frames, span):
+    def slow(frames, span, footprint):
         jobs.append(id(frames))
         assert release.wait(4)
-        return render(frames, span)
+        return render(frames, span, footprint)
 
     monkeypatch.setattr(ui, "render_contact_print", slow)
     try:
@@ -216,10 +267,10 @@ def test_replacing_live_segment_discards_in_flight_preview_without_an_intervenin
     blocker = Event()
     render = ui.render_contact_print
 
-    def render_after_release(frames, span):
+    def render_after_release(frames, span, footprint):
         if frames is first.frames:
             assert blocker.wait(4)
-        return render(frames, span)
+        return render(frames, span, footprint)
 
     monkeypatch.setattr(ui, "render_contact_print", render_after_release)
     try:

@@ -174,6 +174,39 @@ def test_manual_requires_overlapping_observations():
     assert not c.can_snapshot
 
 
+def test_first_contact_exposes_only_its_measured_footprint_before_three_frames_are_ready():
+    capture = ContactPrintCapture()
+    data = field(90)
+    data[3, 7] = 25
+    data[3, 8] = 15
+    data[0, 0] = 60
+    low = np.full(SHAPE, 100.0)
+    low[3, 8] = 50.0
+    profile = EqualizationProfile('both', tuple(low.ravel()), tuple(2 * low.ravel()))
+    capture.observe(0, data, THRESHOLDS, profile)
+    live = capture.live_preview()
+    assert live.stamps_ns == (0,) and capture.live_preview() is live
+    assert not capture.can_snapshot and capture.snapshot() is None
+    assert live.footprints[0].sum() == 2 and live.footprints[0][3, 6:8].all()
+    assert live.frames[0][3, 8] == 30 and not live.footprints[0][3, 8]
+    assert live.frames[0][0, 0] == 60 and not live.footprints[0][0, 0]
+    with pytest.raises(ValueError):
+        live.footprints[0].flags.writeable = True
+
+    # The original seed lightens. Its connected, still measured neighbor stays
+    # in the face only for the frames where that weak support is present.
+    data[3, 6] = 24
+    for i in range(1, 14):
+        if i == 10:
+            data[3, 7] = 0
+        capture.observe(i * 50 * MS, data, THRESHOLDS, profile)
+    printout = capture.snapshot()
+    assert list(map(np.count_nonzero, printout.footprints)) == [2, 2, 1]
+    assert capture.live_preview() is printout and printout.footprints[-1][3, 6]
+    capture.observe(700 * MS, field(0), THRESHOLDS, profile)
+    assert capture.live_preview() is None and capture.latest is printout
+
+
 def test_current_state_quiet_with_residual_and_lighter_held_contact():
     c = ContactPrintCapture()
     assert c.contact_present is None and c.contact_id is None and c.preview() is None

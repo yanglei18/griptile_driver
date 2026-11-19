@@ -49,13 +49,15 @@ The three RGB channels encode one tactile response per taxel. The same response 
 ros2 service call /tactile/sensor_0/set_contact_reference griptile_msgs/srv/SetContactReference '{}'
 ```
 
-### Read contact changes in a single print
+### See the shape of the contact footprint
 
-Click **触印** beside the GripTile name to see the current contact. The unloaded view is blank. During contact, the large image shows the latest response with thin equal-response contours. Three color panels show the same position about 600 ms ago, 300 ms ago and at the latest sample. All four images share the same crop and ADC scale. Weak responses are light blue, then pass through cyan, green, yellow and orange to red at full scale. Compare the color and area of a patch across the three samples to see it load, hold or release. Clear **放大接触区** to locate the patch on the full array.
+Click **触印** beside the GripTile name. The large image shows the current contact footprint as soon as the first contact is observed. A boundary traces the outer edges and supported holes of each patch. Color inside the footprint shows the local response. Separate patches and gaps remain visible. A footprint reaching the edge of the sensor is clipped there. Clear **放大接触区** to locate it on the full array.
+
+Once sufficient observations are available, three color panels show the responses about 600 ms ago, 300 ms ago and at the latest sample, with the same crop and color scale. These panels include weak readings outside the detected footprint and help explain how its shape and strength change during loading and release.
 
 Each print stores the display span from its acquisition. Responses above that span stay red, while the peak readout retains the last exposure's actual ADC response. The known-load workflow provides a separate force estimate in newtons.
 
-Use the existing unloaded reference. The viewer starts tracking a taxel at eight times its own activation threshold and follows it down to twice that threshold as the load lightens. A complete observation with no tracked contact clears the live image and disables the shutter immediately. The main response view still shows low-amplitude readings. A data gap displays a waiting state.
+Use the existing unloaded reference. A taxel reaching eight times its own threshold seeds a patch and continues to be tracked down to twice that threshold. Side-adjacent taxels at or above twice their own thresholds extend that footprint in the current frame. The boundary is interpolated between measured points. Equalization affects the displayed colors. The count describes native taxels included in the footprint. A complete observation with no tracked contact clears the live image immediately. A data gap displays a waiting state.
 
 During contact, **拍下当前** takes a manual print once about 0.6 seconds of continuous readings are available. Following sustained contact, 0.3 seconds below the release threshold confirms an automatic print from the decline. Select **上次留印** to review and export the saved print with its exposures and legend. The live view stays current when a print is saved. Automatic capture also works with the print window closed.
 
