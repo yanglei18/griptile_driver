@@ -244,6 +244,7 @@ def test_window_collects_contact_print_before_open_and_separates_references(open
     first = snapshot(assembler, 1, START)
     reference = profile_status()
     reference.header, reference.direction = first.header, "both"
+    reference.span_adc = 1600.0
     model.accept_reference(reference)
     model.accept(first, 0)
     now = 0
@@ -266,6 +267,7 @@ def test_window_collects_contact_print_before_open_and_separates_references(open
     dialog.shutter_button.click()
     saved = model.contact_prints.latest
     assert not saved.automatic
+    assert saved.span_adc == 1600.0
     assert saved.stamps_ns == tuple(START + 10**12 + i * 50_000_000 for i in (3, 9, 15))
     assert [frame[0, 0] for frame in saved.frames] == [90, 270, 450]
     # An old scalar cannot continue producing exposures when only the state topic is alive.

@@ -57,6 +57,21 @@ def test_release_is_one_observed_edge_only():
     assert max(s[3, 6] for s in c.latest.frames) == 500
 
 
+def test_retained_print_uses_the_source_scale_and_preserves_over_range_values():
+    capture = ContactPrintCapture()
+    for n in range(18):
+        capture.observe(n * 50 * MS, field(2100), THRESHOLDS, span_adc=1000)
+    first = capture.snapshot()
+    assert first.span_adc == 1000 and first.frames[-1].max() == 2100
+    # A change in display calibration starts a new history, while a retained
+    # object still has everything needed to reproduce its original colors.
+    capture.observe(900 * MS, field(500), THRESHOLDS, span_adc=2000)
+    assert capture.latest is None and not capture.can_snapshot and first.span_adc == 1000
+    for n in range(19, 42):
+        capture.observe(n * 50 * MS, field(500 if n < 33 else 0), THRESHOLDS, span_adc=2000)
+    assert capture.latest.automatic and capture.latest.span_adc == 2000
+
+
 @pytest.mark.parametrize('step', [33, 100])
 def test_quick_and_slow_releases_keep_real_contact_exposures(step):
     for levels in ([0] * 24 + [600] * 5 + [0] * 24,

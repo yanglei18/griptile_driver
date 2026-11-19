@@ -1,108 +1,103 @@
-"""The print and its proofs preserve measured locations, time order and validity."""
+"""Color, contour and time semantics of the contact print exported to an operator."""
 
 import numpy as np
 import pytest
 
-from griptile_core.contact_image import INVALID_RGB, SURFACE_SCALE
+from griptile_core.contact_image import (
+    INVALID_RGB, STRONG_RGB, SURFACE_SCALE, UNLOADED_RGB, amplitude_rgb, contact_surface_rgb,
+)
 from griptile_core.contact_print import render_contact_print
 from griptile_core.grid import SHAPE
 
 
-GROUND = np.array([13, 16, 19])
-PAPER = np.array([248, 245, 235])
+CENTER = SURFACE_SCALE // 2
 
 
-def fixed_proof(value):
-    tone = np.arcsinh(min(value, 12000) / 900) / np.arcsinh(12000 / 900)
-    return np.rint(GROUND + (PAPER - GROUND) * tone).astype(np.uint8)
-
-
-def test_channel_ownership_exposure_curve_and_center_registration():
-    amplitudes = (340., 1300., 9400.)
-    fields = np.zeros((3, *SHAPE))
-    fields[:, 3:8, 11:16] = np.array(amplitudes)[:, None, None]
+@pytest.mark.parametrize("span", [900., 3000., 9000.])
+def test_three_frames_match_live_color_map_and_latest_native_centers(span):
+    rows, cols = np.indices(SHAPE)
+    fields = np.stack([factor * (rows + cols) * 14.0 for factor in (1, 5, 9)])
+    fields[:, 0, 0] = 0
+    fields[2, 11, 6] = np.nan
     original = fields.copy()
-    composite, proofs = render_contact_print(fields)
+    master, proofs = render_contact_print(fields, span)
+    assert master.shape == (300, 300, 3) and proofs.shape == (3, 300, 300, 3)
+    assert all(a.flags.c_contiguous and a.dtype == np.uint8 for a in (proofs, master))
+    for i, field in enumerate(fields):
+        np.testing.assert_array_equal(proofs[i], contact_surface_rgb(field, span))
+    centers = master[CENTER::SURFACE_SCALE, CENTER::SURFACE_SCALE]
+    np.testing.assert_array_equal(centers, amplitude_rgb(fields[-1], span))
     np.testing.assert_array_equal(fields, original)
-    assert proofs.shape == (3, 300, 300, 3)
-    assert composite.shape == (300, 300, 3)
-    assert all(a.flags.c_contiguous and a.dtype == np.uint8 for a in (proofs, composite))
-
-    y, x = 5 * SURFACE_SCALE + SURFACE_SCALE // 2, 13 * SURFACE_SCALE + SURFACE_SCALE // 2
-    expected = np.stack([fixed_proof(v) for v in amplitudes])
-    np.testing.assert_array_equal(proofs[:, y, x], expected)
-    color = expected[[2, 1, 0], [0, 1, 2]]
-    np.testing.assert_array_equal(composite[y, x], np.rint(GROUND + .72 * (color - GROUND)))
-    np.testing.assert_array_equal(composite[x, y], GROUND)
 
 
-def test_proofs_clip_at_white_only_and_flat_threshold_is_not_an_outline():
-    fields = np.full((3, *SHAPE), 1500.)
-    image, proofs = render_contact_print(fields)
-    assert np.all(proofs == fixed_proof(1500))
-    assert np.all(image == np.rint(GROUND + .72 * (fixed_proof(1500) - GROUND)))
-    _, proofs = render_contact_print(fields * 100)
-    assert np.all(proofs == PAPER)
+def test_saturation_identical_loads_and_zero_match_display_across_exposures():
+    fields = np.full((3, *SHAPE), 1200.)
+    fields[1, 2, 4] = 3200
+    fields[2, 2, 4] = 11000
+    fields[:, 0, 0] = 0
+    _, proofs = render_contact_print(fields, 3000)
+    samples = proofs[:, CENTER::SURFACE_SCALE, CENTER::SURFACE_SCALE]
+    assert np.all(samples[:, 0, 0] == UNLOADED_RGB)
+    assert np.all(samples[1:, 2, 4] == STRONG_RGB)
+    assert np.all(samples[:, 16, 17] == [34, 176, 100])  # 40% green in every frame.
+    assert fields[2, 2, 4] == 11000
 
 
-def test_each_of_seven_supported_isolines_draws_at_its_native_data_level():
-    fields = np.broadcast_to(np.arange(20) * 450., (3, *SHAPE))
-    image, proofs = render_contact_print(fields)
-    base = np.rint(GROUND + .72 * (proofs[-1, 130].astype(float) - GROUND))
-    added = image[130].astype(float) - base
-    columns = np.arange(image.shape[1])
-    line_expected = np.zeros(len(columns), dtype=bool)
-    for level in (500, 850, 1500, 2400, 3500, 5200, 7500):
-        center = SURFACE_SCALE // 2 + level * SURFACE_SCALE / 450
+def test_current_contours_mark_relative_isolevels_without_historical_ghosts():
+    fields = np.broadcast_to(np.arange(20) * 250., (3, *SHAPE)).copy()
+    fields[0] = fields[1] = fields[-1, :, ::-1].copy()
+    span = 2800.
+    master, proofs = render_contact_print(fields, span)
+    delta = proofs[-1, 130].astype(float) - master[130]
+    columns = np.arange(master.shape[1])
+    marked = np.zeros(len(columns), dtype=bool)
+    for fraction in (.2, .4, .6, .8, 1.):
+        center = CENTER + fraction * span * SURFACE_SCALE / 250
         close = np.abs(columns - center) <= 1
-        assert added[close].max() > 25
-        line_expected |= close
-    assert np.abs(added[~line_expected]).max() <= 1
+        assert delta[close].max() > 15
+        marked |= close
+    assert not delta[~marked].any() and (delta >= 0).all()
+    fields[:2] = 0.
+    redrawn, _ = render_contact_print(fields, span)
+    np.testing.assert_array_equal(master, redrawn)
 
 
-def test_earliest_and_latest_contours_have_distinct_cool_and_warm_inks():
-    inks = ((.09, .53, .73), (.24, .27, .23), (.67, .20, .04))
-    for phase, ink in enumerate(inks):
-        fields = np.zeros((3, *SHAPE))
-        fields[phase] = np.arange(SHAPE[1]) * 500.
-        image, proofs = render_contact_print(fields)
-        y, x = 130, SURFACE_SCALE + SURFACE_SCALE // 2  # Precisely on the 500 ADC level.
-        base = GROUND + .72 * (proofs[[2, 1, 0], y, x, [0, 1, 2]] - GROUND)
-        expected = np.rint(base + .98 * np.asarray(ink) * (PAPER - base))
-        np.testing.assert_array_equal(image[y, x], expected)
+def test_gradients_above_full_scale_stay_saturated_without_extra_contours():
+    fields = np.broadcast_to(3200. + np.arange(20) * 580., (3, *SHAPE))
+    master, proofs = render_contact_print(fields, 3000.)
+    assert np.all(master == STRONG_RGB) and np.all(proofs == STRONG_RGB)
 
 
-def test_hole_is_empty_and_separate_contact_stays_visible():
+def test_holes_dropouts_and_complete_release_are_current_only():
     fields = np.zeros((3, *SHAPE))
-    fields[:, 3:10, 3:10] = 2200
-    fields[:, 5:8, 5:8] = 0
-    fields[:, 15, 17] = 800
-    center = SURFACE_SCALE // 2
-    image, _ = render_contact_print(fields)
-    centers = image[center::SURFACE_SCALE, center::SURFACE_SCALE]
-    np.testing.assert_array_equal(centers[6, 6], GROUND)
-    assert np.all(centers[15, 17] > GROUND)
-    np.testing.assert_array_equal(centers[15, 16], GROUND)
-
-
-def test_missing_data_in_one_exposure_marks_whole_cell_but_not_other_proofs():
-    fields = np.full((3, *SHAPE), 6400.)
-    fields[1, 11, 6] = np.nan
-    image, proofs = render_contact_print(fields)
-    missing = np.isnan(fields[1]).repeat(SURFACE_SCALE, 0).repeat(SURFACE_SCALE, 1)
-    assert np.all(proofs[1][missing] == INVALID_RGB)
-    assert np.all(proofs[[0, 2]] == fixed_proof(6400))
-    assert np.all(image[missing] == INVALID_RGB)
-    # No new gradient or ink beside a dropout in a uniform field.
-    assert np.all(image[~missing] == image[0, 0])
-    image, proofs = render_contact_print(np.full((3, *SHAPE), np.nan))
-    assert np.all(image == INVALID_RGB) and np.all(proofs == INVALID_RGB)
+    fields[:, 3:12, 4:14] = 2500
+    fields[:, 6:9, 8:10] = 0
+    fields[0, 10, 11] = np.nan
+    fields[2, 10, 5] = np.nan
+    master, proofs = render_contact_print(fields)
+    centers = master[CENTER::SURFACE_SCALE, CENTER::SURFACE_SCALE]
+    np.testing.assert_array_equal(centers[7, 8], UNLOADED_RGB)
+    missing_first = np.isnan(fields[0]).repeat(SURFACE_SCALE, axis=0).repeat(SURFACE_SCALE, axis=1)
+    assert np.all(proofs[0][missing_first] == INVALID_RGB)
+    assert not np.array_equal(centers[10, 11], INVALID_RGB)
+    unknown = np.isnan(fields[2]).repeat(SURFACE_SCALE, axis=0).repeat(SURFACE_SCALE, axis=1)
+    assert np.all(master[unknown] == INVALID_RGB)
+    unloaded = np.all(proofs[2] == UNLOADED_RGB, axis=2)
+    assert np.all(master[unloaded] == UNLOADED_RGB)
+    fields[2] = 0
+    released, _ = render_contact_print(fields)
+    assert np.all(released == UNLOADED_RGB)
 
 
 @pytest.mark.parametrize("fields", [np.zeros((2, *SHAPE)), np.zeros((3, 400)),
-                                    np.full((3, *SHAPE), -1.),
-                                    np.full((3, *SHAPE), np.inf),
+                                    np.full((3, *SHAPE), -1.), np.full((3, *SHAPE), np.inf),
                                     np.full((3, *SHAPE), True)])
 def test_invalid_fields_are_rejected(fields):
     with pytest.raises(ValueError):
         render_contact_print(fields)
+
+
+@pytest.mark.parametrize("span", [0., -100., np.nan, np.inf])
+def test_invalid_span_is_rejected(span):
+    with pytest.raises(ValueError):
+        render_contact_print(np.zeros((3, *SHAPE)), span)

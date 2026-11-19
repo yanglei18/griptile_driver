@@ -6,7 +6,7 @@ from numbers import Integral
 
 import numpy as np
 
-from griptile_core.contact_image import CONTACT_SEED_RATIO, CONTACT_SUPPORT_RATIO
+from griptile_core.contact_image import CONTACT_SEED_RATIO, CONTACT_SUPPORT_RATIO, DEFAULT_CONTACT_SPAN
 from griptile_core.equalization import apply_equalization
 from griptile_core.grid import SHAPE
 
@@ -19,6 +19,7 @@ class ContactPrint:
     frames: tuple
     automatic: bool
     equalized: bool
+    span_adc: float = DEFAULT_CONTACT_SPAN
 
 
 @dataclass(frozen=True, eq=False)
@@ -66,9 +67,10 @@ class ContactPrintCapture:
         self.interrupt()
         self.latest = None
         self._profile = None
+        self._span_adc = DEFAULT_CONTACT_SPAN
         self._last_stamp = None
 
-    def observe(self, stamp_ns, measured, thresholds, profile=None):
+    def observe(self, stamp_ns, measured, thresholds, profile=None, *, span_adc=DEFAULT_CONTACT_SPAN):
         """Accept one matched source frame. The caller owns stream and zero-reference identity."""
         if isinstance(stamp_ns, bool) or not isinstance(stamp_ns, Integral):
             raise ValueError("触印需要整数源时间戳")
@@ -79,9 +81,12 @@ class ContactPrintCapture:
         thresholds = np.asarray(thresholds)
         if field.shape != SHAPE or thresholds.shape != SHAPE:
             raise ValueError("触印需要 20×20 响应与逐点门限")
-        if self._profile is not profile:
+        if self._profile is not profile or self._span_adc != span_adc:
+            if not np.isfinite(span_adc) or span_adc <= 0:
+                raise ValueError("触印色标量程必须为有限正数")
             self.reset()
             self._profile = profile
+            self._span_adc = float(span_adc)
         if self._last_stamp is not None and stamp_ns - self._last_stamp > self.MAX_GAP_NS:
             self.interrupt()
         self._last_stamp = stamp_ns
@@ -149,7 +154,7 @@ class ContactPrintCapture:
 
     def _print(self, triplet, *, automatic):
         return ContactPrint(tuple(s.stamp_ns for s in triplet), tuple(s.field for s in triplet),
-                            automatic, self._profile is not None)
+                            automatic, self._profile is not None, self._span_adc)
 
     def snapshot(self):
         """Capture the most recent three exposures on operator request."""

@@ -51,7 +51,9 @@ ros2 service call /tactile/sensor_0/set_contact_reference griptile_msgs/srv/SetC
 
 ### Read contact changes in a single print
 
-Click **触印** beside the GripTile name to see the current contact. The unloaded view is blank. During contact, three source-timed response maps share the same coordinates. Copper highlights contours that emerge later, cyan highlights receding contours, and overlapping contours approach ivory. The three monochrome panels below show the individual exposures from oldest to newest, roughly 300 ms apart. Brighter regions have a stronger response above the unloaded reference. Clear **放大接触区** to locate the patch on the full array.
+Click **触印** beside the GripTile name to see the current contact. The unloaded view is blank. During contact, the large image shows the latest response with thin equal-response contours. Three color panels show the same position about 600 ms ago, 300 ms ago and at the latest sample. All four images share the same crop and ADC scale. Weak responses are light blue, then pass through cyan, green, yellow and orange to red at full scale. Compare the color and area of a patch across the three samples to see it load, hold or release. Clear **放大接触区** to locate the patch on the full array.
+
+Each print stores the display span from its acquisition. Responses above that span stay red, while the peak readout retains the last exposure's actual ADC response. The known-load workflow provides a separate force estimate in newtons.
 
 Use the existing unloaded reference. The viewer starts tracking a taxel at eight times its own activation threshold and follows it down to twice that threshold as the load lightens. A complete observation with no tracked contact clears the live image and disables the shutter immediately. The main response view still shows low-amplitude readings. A data gap displays a waiting state.
 
@@ -59,7 +61,7 @@ During contact, **拍下当前** takes a manual print once about 0.6 seconds of 
 
 The live viewer matches the native 20×20 scalar response to its source state and labels prints made with active taxel equalization. Standard bag replay reconstructs the scalar response from samples and the recorded reference. Interpolated contours visualize the footprint between measured points. The ROS `state` and `contact_response` topics supply native data for quantitative analysis and CV.
 
-![Synthetic example of a ring unloading on one side, with three measured-grid views below the composite](contact-print.png)
+![Synthetic ring unloading on one side, with three color exposures beneath the latest response](contact-print.png)
 
 ### Match taxel colors under equal local pressure
 

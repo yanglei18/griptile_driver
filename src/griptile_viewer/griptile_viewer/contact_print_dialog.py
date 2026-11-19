@@ -6,7 +6,8 @@ from time import monotonic
 import numpy as np
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
-from griptile_core.contact_print import render_contact_print
+from griptile_core.contact_image import CONTACT_COLOR_STOPS
+from griptile_core.contact_print import CONTOUR_FRACTIONS, render_contact_print
 from griptile_core.grid import COLS, ROWS
 
 
@@ -15,13 +16,11 @@ PAPER = QtGui.QColor("#ede8d9")
 INK = QtGui.QColor("#232a2c")
 SUBTLE = QtGui.QColor("#62675f")
 FULL_ARRAY = QtCore.QRect(0, 0, COLS, ROWS)
-_COLOR_KEY = "暖铜　响应增强　 ·　 青色　响应回落　 ·　 灰白　三次相近"
 
 
-def _contact_bounds(frames):
-    # Include the union of all three lowest visible contour footprints plus
-    # a margin. A weak-only exposure keeps the whole sensor in view.
-    rows, cols = np.nonzero(np.any(np.asarray(frames) >= 500, axis=0))
+def _contact_bounds(frames, span_adc):
+    # All three exposures share a crop at the first visible contour level.
+    rows, cols = np.nonzero(np.any(np.asarray(frames) >= CONTOUR_FRACTIONS[0] * span_adc, axis=0))
     if not len(rows):
         return FULL_ARRAY
     area = QtCore.QRect(QtCore.QPoint(int(cols.min()), int(rows.min())),
@@ -58,6 +57,16 @@ def _draw_exposure(painter, rect, image, bounds):
     painter.drawImage(target, image, source)
 
 
+def _draw_response_scale(painter, x, width, bottom, span_adc):
+    gradient = QtGui.QLinearGradient(x, 0, x + width, 0)
+    for level, rgb in CONTACT_COLOR_STOPS:
+        gradient.setColorAt(level, QtGui.QColor(*rgb))
+    painter.fillRect(QtCore.QRectF(x, bottom - 28, width, 7), gradient)
+    label = QtCore.QRectF(x, bottom - 20, width, 18)
+    _text(painter, label, "弱  0", SUBTLE, 12)
+    _text(painter, label, f"≥{span_adc:g} ADC · 红色饱和", SUBTLE, 12, right=True)
+
+
 class _PrintPlate(QtWidgets.QWidget):
     """Paint the same registered composition to a window or an export device."""
 
@@ -69,6 +78,7 @@ class _PrintPlate(QtWidgets.QWidget):
         self.proof_labels = ()
         self.incomplete = False
         self.historical = False
+        self.peak_text = ""
         self.empty_text = "等待有效读数"
         self.zoomed = True
         self.setMinimumSize(300, 320)
@@ -81,6 +91,7 @@ class _PrintPlate(QtWidgets.QWidget):
         self.images = self.proof_labels = ()
         self.bounds = FULL_ARRAY
         self.incomplete = self.historical = False
+        self.peak_text = ""
         self.empty_text = message
         self.setAccessibleDescription(message)
         self.update()
@@ -88,14 +99,20 @@ class _PrintPlate(QtWidgets.QWidget):
     def assign(self, record, images, *, historical):
         self.record = record
         self.images = tuple(_qimage(image) for image in images)
-        self.bounds = _contact_bounds(record.frames)
+        self.bounds = _contact_bounds(record.frames, record.span_adc)
         self.historical = historical
         last = record.stamps_ns[-1]
         self.proof_labels = tuple(f"{round((last - t) / 1_000_000)} 毫秒前"
                                   for t in record.stamps_ns[:-1]) + (("取印时" if historical else "此刻"),)
         self.incomplete = not np.isfinite(record.frames).all()
+        newest = record.frames[-1]
+        valid = newest[np.isfinite(newest)]
+        peak = f"{valid.max():,.1f}".rstrip("0").rstrip(".") if valid.size else "—"
+        self.peak_text = f"{self.proof_labels[-1]}峰值 {peak} ADC"
         self.setAccessibleDescription(self.caption() + "。" + "、".join(self.proof_labels)
-                                      + "。单帧越亮，响应越强。" + _COLOR_KEY)
+                                      + "。主图与三帧共用响应色标。"
+                                      + f"红色表示达到或超过 {record.span_adc:g} ADC。"
+                                      + self.peak_text)
         self.update()
 
     def caption(self):
@@ -131,13 +148,15 @@ class _PrintPlate(QtWidgets.QWidget):
             return
         painter.fillRect(rect(0, hero, width, proof_height), PAPER)
         tile_top = hero + 29
-        tile_h = max(30, proof_height - 78)
+        tile_h = max(24, proof_height - 85)
         gap = max(6, margin // 2)
         tile_w = (width - 2 * margin - 2 * gap) / 3
-        proof_note = "同一位置 · 越亮，响应越强"
+        proof_note = "同一位置 · 从早到晚"
         if self.incomplete:
-            proof_note += "　中灰方块为缺测"
+            proof_note = "灰色区域为缺测"
         _text(painter, rect(margin, hero + 4, width - 2 * margin, 22), proof_note, INK, 13)
+        _text(painter, rect(margin, hero + 4, width - 2 * margin, 22),
+              self.peak_text, INK, 12, right=True)
         bounds = self.bounds if self.zoomed else FULL_ARRAY
         if bounds != FULL_ARRAY:
             # Locator shows the selected region in the full physical array.
@@ -164,14 +183,7 @@ class _PrintPlate(QtWidgets.QWidget):
             _draw_exposure(painter, tile, self.images[i + 1], bounds)
             _text(painter, rect(x, tile_top + tile_h + 1, tile_w, 18),
                   self.proof_labels[i], INK, 12)
-        legend = (("#b87649", "暖铜", "增强"), ("#367f92", "青色", "回落"),
-                  ("#858981", "灰白", "三次相近"))
-        for i, (color, tone, meaning) in enumerate(legend):
-            x = margin + i * (tile_w + gap)
-            painter.fillRect(rect(x, height - 15, 7, 7), QtGui.QColor(color))
-            label = tone + "  " + meaning
-            _text(painter, rect(x + 12, height - 23, tile_w - 12, 22), label, SUBTLE,
-                  11 if width < 420 else 13)
+        _draw_response_scale(painter, margin, width - 2 * margin, height - 4, self.record.span_adc)
 
     def export_image(self):
         image = QtGui.QImage(1280, 1200, QtGui.QImage.Format_RGB32)
@@ -284,7 +296,7 @@ class ContactPrintDialog(QtWidgets.QDialog):
         if target is not None and self.plate.record is not target:
             if self._executor is None:
                 self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="griptile-print")
-            self._work = view, target, self._executor.submit(render_contact_print, target.frames)
+            self._work = view, target, self._executor.submit(render_contact_print, target.frames, target.span_adc)
 
     def refresh(self):
         if not self.isVisible():

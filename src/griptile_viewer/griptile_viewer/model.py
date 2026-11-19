@@ -285,7 +285,8 @@ class ArrayView:
             # Wait until every participating row has a new observation.
             if not valid_rows.any() or (rows[valid_rows] <= self._print_rows[valid_rows]).any():
                 continue
-            self.contact_prints.observe(stamp, np.where(valid, source[key], np.nan), thresholds, profile)
+            self.contact_prints.observe(stamp, np.where(valid, source[key], np.nan), thresholds,
+                                        profile, span_adc=context.span_adc)
             self._print_rows[valid_rows] = rows[valid_rows]
             self._print_stamp, self._print_received = stamp, received
         # A delayed draw may still have a continuous queue of fresh source frames.
