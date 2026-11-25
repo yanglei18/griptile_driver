@@ -5,7 +5,7 @@ import pytest
 
 from griptile_core.contact_image import (
     DEFAULT_CONTACT_SPAN, INVALID_RGB, STRONG_RGB, SURFACE_SCALE, UNLOADED_RGB, WEAK_RGB,
-    amplitude_rgb, contact_amplitude, contact_intensity_rgb, contact_rgb, contact_surface_rgb,
+    amplitude_rgb, contact_amplitude, contact_intensity_rgb, contact_map_rgb, contact_rgb, contact_surface_rgb,
     surface_contact_outline,
 )
 from griptile_core.display_response import ReferenceProfile, ResponseSettings, TactileResponseProcessor
@@ -22,6 +22,28 @@ def test_readout_swatch_matches_native_taxel_at_any_display_span():
     native = amplitude_rgb(field, 1500)
     for col in range(6):
         assert contact_intensity_rgb(field[0, col], 1500) == tuple(native[0, col])
+
+
+def test_operator_map_reveals_light_measured_edges_at_a_fixed_span():
+    # Bottom and upper parts of the bottle-cap edge were still detectable at
+    # about 96 ADC on press and 265 ADC during release at a 3000 ADC span.
+    field = np.zeros((ROWS, COLS))
+    field[8, :8] = [0., 6.5, 96., 265., 1500., 3000., 4500., np.nan]
+    mid = SURFACE_SCALE // 2
+    def centers():
+        return contact_map_rgb(field, 3000.)[8 * SURFACE_SCALE + mid, mid::SURFACE_SCALE][:8]
+
+    colors = centers()
+    assert tuple(colors[0]) == (11, 17, 28) and tuple(colors[-1]) == INVALID_RGB
+    normalized = colors[:6] / 255.
+    linear = np.where(normalized <= .04045, normalized / 12.92, ((normalized + .055) / 1.055) ** 2.4)
+    luminance = linear @ [0.2126, 0.7152, 0.0722]
+    contrast = (luminance + .05) / (luminance[0] + .05)
+    assert contrast[2] > 3. and contrast[3] > 4.
+    assert np.all(np.diff(luminance) > 0)
+    np.testing.assert_array_equal(colors[5], colors[6])
+    field[0, 19] = 60_000.
+    np.testing.assert_array_equal(centers(), colors)
 
 
 def calibrated(direction="both", reference_mask=None):

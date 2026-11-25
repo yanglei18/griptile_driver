@@ -15,6 +15,7 @@
 - Add a matrix viewer, neutral reference capture, a simulated sensor and sample-based replay.
 - Add native RGB8 contact footprints, driver-owned unloaded references, recorded-reference replay and pixel-exact PNG export.
 - Open on a fixed 300×300 contact map. Measured patches progress from blue through purple to red on a dark blue-black unloaded surface. A patch must meet its taxels’ noise-based detection criteria. The optional outline follows the same patch and preserves measured holes and gaps. The PNG exports the colored surface.
+- Detect lighter contact from successive fresh measurements at the same taxel and across neighbors. Give the low end of the fixed display scale more blue contrast. The on-screen legend uses the same colors as the map, and the peak percentage follows the measured response at the configured ADC span.
 - Keep the native 20×20 RGB view, ROS image and native PNG on the light blue-gray to red scale. Weaker individual responses can be inspected in this view.
 - Place unloaded zeroing (**空载归零**) and contact print (**触印**) beside the main map. Details now groups serial settings, taxel calibration, known-load checks, display modes and exports. The main map guides connection and zeroing and reports progress and failures.
 - Save manually acquired or imported unloaded references on the live acquisition host for verified devices. Reuse a reference on reconnect when the sensor ID, hardware identity, protocol, layout and response direction match. Replay uses its recorded reference.

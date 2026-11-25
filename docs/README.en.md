@@ -37,9 +37,13 @@ The default **连续接触面（估算）** (Continuous contact surface) shows t
 | Blue → purple → red | Strength within a detected contact patch. The scale reaches red at 3000 ADC counts by default |
 | Gray | Missing reference coverage or stale readings leave the contact state unknown |
 
-The peak next to the color scale reports the strongest detected taxel as a percentage of the display span. The 300×300 surface and its PNG export interpolate between the measured taxels within the supported footprint. A partially measured rim appears as an arc. **详情 → 接触轮廓** shows or hides the outline of the same footprint. The PNG contains the colored surface, with the thin outline shown on screen.
+Strong contact can appear immediately. For lighter touches, the map also checks fresh, successive measurements for changes at the same taxel and its neighbors. It colors the areas supported by these readings. Light contact uses a brighter blue. The peak still reports the strongest detected taxel response as a percentage of the fixed ADC span.
 
-To see weaker individual readings, select **详情 → 接触图 RGB**. This native 20×20 RGB view uses a light blue-gray unloaded color, progressing through pale blue, cyan, green, yellow, orange and red. Row 0 and column 0 meet at the top left. This mode exports a 20×20 RGB PNG and uses the source image colors during replay. Raw ADC, signed ΔADC, per-cell traces and CSV export are also available in Details. [Native 20×20 RGB example](contact-ring.png)
+The 300×300 surface and its PNG export interpolate between the measured taxels within the supported footprint. A partially measured rim appears as an arc. **详情 → 接触轮廓** shows or hides the outline of the same footprint. The PNG contains the colored surface, with the thin outline shown on screen.
+
+**已归零** (Zeroed) means the sensor has an unloaded reference. Detecting a light touch also requires a signal distinguishable from the unloaded noise. A noisy reference capture can leave a high threshold on a taxel, so its native response may stay at zero during light contact. **详情 → 原始 ADC** shows the measured ADC values.
+
+To see the noise-gated responses at individual taxels, select **详情 → 接触图 RGB**. This native 20×20 RGB view uses a light blue-gray unloaded color, progressing through pale blue, cyan, green, yellow, orange and red. Row 0 and column 0 meet at the top left. This mode exports a 20×20 RGB PNG and uses the source image colors during replay. Signed ΔADC, per-cell traces and CSV export are also available in Details. [Native 20×20 RGB example](contact-ring.png)
 
 Set `contact_span_adc:=6000.0` to extend the display range. The default `contact_direction:=both` accepts either sign of ADC change. Select `increase` or `decrease` when the pressure polarity is known. Colors represent sensor response. Force in newtons requires load calibration, and physical contact area requires taxel spacing.
 

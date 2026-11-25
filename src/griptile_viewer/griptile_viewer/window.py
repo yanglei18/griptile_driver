@@ -11,7 +11,7 @@ from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from griptile_core.contact_image import (
     CONTACT_COLOR_STOPS, CONTACT_MAP_STOPS, CONTACT_OUTLINE_RGB, DEFAULT_CONTACT_SPAN, INVALID_RGB,
-    SURFACE_SCALE, UNLOADED_RGB, amplitude_rgb, contact_map_rgb, footprint_surface,
+    SURFACE_SCALE, UNLOADED_RGB, amplitude_rgb, color_scale_rgb, contact_map_rgb, footprint_surface,
 )
 
 from griptile_core.equalization import apply_equalization
@@ -38,13 +38,27 @@ CONTACT_MODE, SURFACE_MODE, RAW_MODE, DELTA_MODE = range(4)
 _LEGACY_UNLOADED_RGB = (255, 255, 255)
 
 
+class _ContactGradient(QtWidgets.QFrame):
+    stops = CONTACT_MAP_STOPS
+
+    def paintEvent(self, event):
+        # Paint the same RGB codes as the sensor map, including zero at the
+        # first pixel. A Qt stylesheet gradient samples between the endpoints.
+        width = round(self.width() * self.devicePixelRatioF())
+        colors = color_scale_rgb(np.linspace(0., 1., width), self.stops)
+        image = QtGui.QImage(colors.data, width, 1, colors.nbytes,
+                             QtGui.QImage.Format_RGB888)
+        painter = QtGui.QPainter(self)
+        painter.drawImage(self.rect(), image)
+
+
 def _contact_legend(peak):
     legend = QtWidgets.QWidget()
     layout = QtWidgets.QHBoxLayout(legend)
     layout.setContentsMargins(0, 0, 0, 0)
     layout.setSpacing(7)
     layout.addWidget(QtWidgets.QLabel("无载"))
-    bar = QtWidgets.QFrame()
+    bar = _ContactGradient()
     bar.setObjectName("contactGradient")
     bar.setMinimumWidth(36)
     bar.setFixedHeight(6)
@@ -57,11 +71,11 @@ def _contact_legend(peak):
 
 
 def _set_contact_legend(legend, surface):
-    bar = legend.findChild(QtWidgets.QFrame, "contactGradient")
-    palette = CONTACT_MAP_STOPS if surface else CONTACT_COLOR_STOPS
-    stops = ", ".join(f"stop:{position:g} {QtGui.QColor(*rgb).name()}" for position, rgb in palette)
-    bar.setStyleSheet(f"background: qlineargradient(x1:0, y1:0, x2:1, y2:0, {stops});")
-    text = "无接触为深色，接触由蓝到紫到红。灰色表示缺测。" if surface else "响应由浅蓝灰、青、绿、黄到红。灰色表示缺测。"
+    bar = legend.findChild(_ContactGradient)
+    bar.stops = CONTACT_MAP_STOPS if surface else CONTACT_COLOR_STOPS
+    bar.update()
+    text = ("轻触呈蓝色，增强后转紫、红。色标固定，峰值按实际响应占量程的比例计算。灰色表示缺测。" if surface
+            else "响应由浅蓝灰、青、绿、黄到红。灰色表示缺测。")
     bar.setAccessibleDescription(text)
     bar.setToolTip(text)
 
@@ -473,7 +487,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
         model = self.model
         model.track_clock(now)
         self.equalization.sync()
-        model.update_contact_print(now, self.equalization.active)
+        model.update_contacts(now, self.equalization.active)
         if self.contact_print_page is not None:
             self.contact_print_page.refresh()
         message = model.message

@@ -9,6 +9,7 @@ from griptile_core.contact_image import INVALID_RGB, contact_footprint
 from griptile_core.display_response import ReferenceProfile
 from griptile_core.grid import CELL_COUNT, COLS, LAYOUT_ID, ROWS, SHAPE, normalize_state
 from griptile_core.identity import validate_sensor_id
+from griptile_core.light_contact import LightContactTracker
 from griptile_core.protocol import PROTOCOL_ID
 
 from .load_capture import LoadContext, LoadObservation
@@ -37,6 +38,7 @@ class ArrayView:
         self._images = deque(maxlen=4)
         self._responses = deque(maxlen=4)
         self.contact_prints = ContactPrintCapture()
+        self._reset_light_contact()
         self._reset_prints()
         self._has_measured_response = False
         self._load_reference = None
@@ -54,6 +56,7 @@ class ArrayView:
         self.rejection = ""
 
     def reset_stream(self):
+        self._reset_light_contact()
         self._reset_prints()
         self._states.clear()
         self._images.clear()
@@ -62,6 +65,10 @@ class ArrayView:
         self.trend.clear()
         self.message = None
         self.identity = None
+
+    def _reset_light_contact(self):
+        self._light_tracker = LightContactTracker()
+        self._light_context = self._light_stamp = self._light_mask = None
 
     def _reset_prints(self):
         self.contact_prints.reset()
@@ -253,16 +260,21 @@ class ArrayView:
             stamp = state.header.stamp.sec * 1_000_000_000 + state.header.stamp.nanosec
             seeds = self.contact_prints.active_taxels_at(stamp) if self._print_context is context else None
             footprint = contact_footprint(amplitude, thresholds, seeds)
+            if self._light_context is context and self._light_stamp == stamp:
+                footprint |= self._light_mask
             amplitude = np.where(known, np.where(footprint, amplitude, 0.), np.nan)
         return amplitude, thresholds
 
-    def update_contact_print(self, clock_ns, profile=None):
+    def update_contacts(self, clock_ns, profile=None):
         """Feed each new measured scan once, independent of Qt refresh or DDS arrival order."""
         if self.message is not None and (not self.message.connected or not self.message.time_valid):
             # The stream ended. Its finished print is still available for export.
             # accept() interrupted the shutter; a new stream or reference resets it.
             return
         context = self.load_context
+        if context is not self._light_context:
+            self._reset_light_contact()
+            self._light_context = context
         if context is not self._print_context or profile is not self._print_profile:
             self._reset_prints()
             self._print_context, self._print_profile = context, profile
@@ -272,9 +284,25 @@ class ArrayView:
         reference = self.reference
         valid_now = self.mask(clock_ns) & np.asarray(reference.valid_mask).reshape(SHAPE)
         thresholds = np.asarray(reference.activation_threshold_adc).reshape(SHAPE)
+        baseline = np.asarray(reference.baseline_adc).reshape(SHAPE)
         for key, state, received in self._states:
+            if key not in source:
+                continue
             stamp = int(key[1]) * 1_000_000_000 + int(key[2])
-            if key not in source or (self._print_stamp is not None and stamp <= self._print_stamp):
+            new_light = self._light_stamp is None or stamp > self._light_stamp
+            new_print = self._print_stamp is None or stamp > self._print_stamp
+            if not (new_light or new_print):
+                continue
+            valid = valid_now & self._mask_at(state, received, clock_ns)
+            valid &= self._rows_after_reference(state, context)[:, None]
+            field = np.where(valid, source[key], np.nan)
+            rows = np.asarray(state.row_monotonic_ns)
+            if new_light:
+                signed = np.asarray(state.adc).reshape(SHAPE) - baseline
+                self._light_mask = self._light_tracker.update(
+                    stamp, rows, signed, field, thresholds)
+                self._light_stamp = stamp
+            if not new_print:
                 continue
             if not any(state.valid_mask):
                 # This observed scan was already empty at acquisition. A later
@@ -282,15 +310,12 @@ class ArrayView:
                 self.contact_prints.interrupt()
                 self._print_stamp, self._print_received = stamp, None
                 continue
-            valid = valid_now & self._mask_at(state, received, clock_ns)
-            valid &= self._rows_after_reference(state, context)[:, None]
             valid_rows = valid.any(axis=1)
-            rows = np.asarray(state.row_monotonic_ns)
             # A rolling state can publish the same physical row repeatedly.
             # Wait until every participating row has a new observation.
             if not valid_rows.any() or (rows[valid_rows] <= self._print_rows[valid_rows]).any():
                 continue
-            self.contact_prints.observe(stamp, np.where(valid, source[key], np.nan), thresholds,
+            self.contact_prints.observe(stamp, field, thresholds,
                                         profile, span_adc=context.span_adc)
             self._print_rows[valid_rows] = rows[valid_rows]
             self._print_stamp, self._print_received = stamp, received
@@ -299,6 +324,8 @@ class ArrayView:
         if self._print_received is not None and clock_ns - self._print_received > self.message.max_age_ns:
             self.contact_prints.interrupt()
             self._print_received = None
+
+    update_contact_print = update_contacts
 
     def accept(self, message, clock_ns):
         if message.sensor_id != self.sensor_id:
@@ -331,6 +358,7 @@ class ArrayView:
         self.message = message
         self.receive_clock = clock_ns
         if not message.connected or not message.time_valid:
+            self._reset_light_contact()
             self.contact_prints.interrupt()
             if not message.connected:
                 self._load_reference = None

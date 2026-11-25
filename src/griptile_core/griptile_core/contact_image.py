@@ -25,23 +25,28 @@ CONTACT_COLOR_STOPS = (
 )
 WEAK_RGB = CONTACT_COLOR_STOPS[0][1]
 STRONG_RGB = CONTACT_COLOR_STOPS[-1][1]
-# The operator's contact map uses a fixed dark-to-blue-to-red scale. The
-# recorded RGB topic and its native palette remain independently decodable.
+# Stops are fractions of the configured ADC span. Give low responses more
+# blue contrast while keeping zero dark and increasing luminance at every stop.
 CONTACT_MAP_STOPS = (
-    (0., (11, 17, 28)), (.10, (34, 69, 120)), (.25, (56, 102, 187)),
-    (.50, (136, 93, 182)), (.75, (207, 81, 129)), (1., (255, 93, 79)),
+    (0., (11, 17, 28)), (.0025, (26, 51, 87)), (.01, (42, 90, 157)),
+    (.05, (48, 110, 184)), (.15, (67, 131, 203)), (.30, (115, 140, 208)),
+    (.50, (172, 132, 189)), (.75, (227, 125, 147)), (1., (255, 127, 102)),
 )
 SURFACE_SCALE = 15  # An odd scale puts every measured center exactly on a display pixel.
+
+
+def color_scale_rgb(fractions, stops):
+    """Map fractions of a fixed ADC span to RGB for measured pixels and their legend."""
+    levels, colors = zip(*stops)
+    channels = [np.interp(fractions, levels, channel) for channel in zip(*colors)]
+    return np.rint(np.stack(channels, axis=-1)).astype(np.uint8)
 
 
 def _color_response(amplitude, valid, active, span, stops=CONTACT_COLOR_STOPS, unloaded=UNLOADED_RGB):
     pixels = np.empty((*amplitude.shape, 3), dtype=np.uint8)
     pixels[:] = unloaded
     pixels[~valid] = INVALID_RGB
-    strength = amplitude[active] / span
-    levels, colors = zip(*stops)
-    channels = [np.interp(strength, levels, channel) for channel in zip(*colors)]
-    pixels[active] = np.rint(np.column_stack(channels))
+    pixels[active] = color_scale_rgb(amplitude[active] / span, stops)
     return pixels
 
 

@@ -432,7 +432,7 @@ def test_hidden_array_waits_for_navigation_or_export_without_stalling_load_tool(
     path = tmp_path / "hidden-array.png"
     window.save_png(path)
     image = QtGui.QImage(str(path))
-    assert image.pixelColor(150, 150).getRgb()[:3] == CONTACT_MAP_STOPS[3][1]
+    assert image.pixelColor(150, 150).getRgb()[:3] == dict(CONTACT_MAP_STOPS)[.50]
     assert not window.map.isVisible()
 
     now += 50_000_000
@@ -546,6 +546,49 @@ def test_contact_map_retains_only_same_contact_during_light_release():
     assert observe(5, 12) == 0
     stale, _ = model.contact_surface_inputs(1_000_000_000, confirmed_only=True)
     assert np.isnan(stale).all()
+
+
+def test_live_light_contact_pairs_raw_rows_with_response_and_restarts_after_zero():
+    model = ArrayView(SENSOR)
+    assembler = Assembler(sensor_id=SENSOR)
+    first = snapshot(assembler, 1, START)
+    zero = profile_status()
+    zero.header, zero.direction = first.header, "both"
+    zero.activation_threshold_adc = [10.] * 400
+    model.accept(first, 0)
+    model.accept_reference(zero)
+
+    def sample(index, net):
+        now = index * 33_000_000
+        state = snapshot(assembler, index + 1, START + now)
+        raw = np.asarray(state.adc).reshape(20, 20).copy()
+        field = np.zeros((20, 20), np.float32)
+        if net:
+            raw[4, 8:10] += net + 5  # Driver subtracts the release noise floor.
+            field[4, 8:10] = net
+        state.adc = raw.ravel().tolist()
+        model.accept_response(response(state, field))
+        model.accept(state, now)
+        model.update_contacts(now)
+        return state, model.contact_surface_inputs(now, confirmed_only=True)[0]
+
+    for index in range(1, 11):
+        _, surface = sample(index, 0)
+        assert not surface.any()
+    state, surface = sample(11, 15)
+    assert not surface.any()
+    for _ in range(4):
+        model.update_contacts(11 * 33_000_000)
+    assert not model.contact_surface_inputs(11 * 33_000_000, confirmed_only=True)[0].any()
+    state, surface = sample(12, 15)
+    assert np.count_nonzero(surface) == 2 and surface[4, 8] == 15
+    assert model.contact_prints.contact_present is False
+    assert model.contact_response(12 * 33_000_000)[4, 8] == 15
+
+    zero.header = state.header
+    model.accept_reference(zero)
+    _, surface = sample(13, 15)
+    assert not surface.any()  # A replaced reference cannot inherit light-contact evidence.
 
 
 def test_contour_is_a_display_layer_bound_to_the_measured_reference(open_window, tmp_path):
@@ -754,10 +797,12 @@ def test_continuous_mode_png_selection_coordinates_and_native_export(open_window
     np.testing.assert_array_equal(original, contact_map_rgb(confirmed, status.span_adc))
     np.testing.assert_array_equal(native[3, swatches], [rgb for _, rgb in CONTACT_COLOR_STOPS])
     gradient = window.scale.findChild(QtWidgets.QFrame, "contactGradient").grab().toImage()
-    for position, rgb in CONTACT_MAP_STOPS:
-        x = round(position * (gradient.width() - 1))
-        swatch = gradient.pixelColor(x, gradient.height() // 2).getRgb()[:3]
-        np.testing.assert_allclose(swatch, rgb, atol=4)
+    stops, colors = zip(*CONTACT_MAP_STOPS)
+    positions = np.linspace(0., 1., gradient.width())
+    expected = np.rint([np.interp(positions, stops, ch) for ch in zip(*colors)]).T
+    legend_colors = [gradient.pixelColor(x, gradient.height() // 2).getRgb()[:3]
+                     for x in range(gradient.width())]
+    np.testing.assert_array_equal(legend_colors, expected)
     # The 300-pixel image still occupies [0,20) on both axes, including after mode switches.
     for row, col in ((0, 0), (19, 19), (3, 12), (17, 2)):
         scene = window.image.mapToScene(QtCore.QPointF((col + .5) * 15, (row + .5) * 15))
