@@ -28,6 +28,7 @@ def bench(monkeypatch, open_window):
     monkeypatch.setattr(model, "load_observation", observe)
     requests = []
     window = open_window(model, clock_ns=lambda: clock.now, request_reference=requests.append)
+    window.details_button.click()
     window.load_button.click()
     dialog = window.load_dialog
     dialog.wall_clock = lambda: clock.now
@@ -187,6 +188,7 @@ def test_incomplete_reference_can_be_recaptured_from_the_dialog(open_window):
     model.accept_reference(reference)
     requests = []
     window = open_window(model, clock_ns=lambda: 0, request_reference=requests.append)
+    window.details_button.click()
     window.load_button.click()
     dialog = window.load_dialog
     assert model.load_context is not None

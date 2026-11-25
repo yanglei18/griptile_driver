@@ -33,9 +33,12 @@ def viewer(open_window):
     return open_window(ArrayView("jaw"), serial_control=control), control
 
 
-def test_port_controls_appear_on_compact_live_window_and_manage_connection(viewer):
+def test_port_controls_are_available_from_details_and_manage_connection(viewer):
     window, control = viewer
-    assert window.serial_button.isVisible() and not window.details.isVisible()
+    assert not window.serial_button.isVisible() and not window.details.isVisible()
+    assert "串口设置" in window.map_hint.text()
+    window.details_button.click()
+    assert window.serial_button.isVisible() and window.serial_dialog is None
     window.serial_button.click()
     dialog = window.serial_dialog
     assert control.calls == [("refresh", "", 115200)]
@@ -62,6 +65,7 @@ def test_port_controls_appear_on_compact_live_window_and_manage_connection(viewe
 
 def test_refresh_preserves_manual_input_and_distinguishes_an_error_from_live_samples(viewer):
     window, control = viewer
+    window.details_button.click()
     window.serial_button.click()
     dialog = window.serial_dialog
     control.reply()
@@ -86,6 +90,7 @@ def test_refresh_preserves_manual_input_and_distinguishes_an_error_from_live_sam
 
 def test_wait_for_service_reopen_and_replay(viewer, open_window):
     window, control = viewer
+    window.details_button.click()
     control.available = False
     window.serial_button.click()
     dialog = window.serial_dialog
@@ -99,6 +104,7 @@ def test_wait_for_service_reopen_and_replay(viewer, open_window):
     window.serial_button.click()
     assert window.serial_dialog is dialog and len(control.calls) == 2
     replay = open_window(ArrayView("jaw", replay=True), serial_control=control)
+    replay.details_button.click()
     assert not replay.serial_button.isVisible()
     replay.open_serial_dialog()
     assert replay.serial_dialog is None
@@ -110,6 +116,7 @@ def test_wait_for_service_reopen_and_replay(viewer, open_window):
 ])
 def test_open_port_reports_why_it_has_no_valid_samples_and_allows_retry(viewer, reason, hint):
     window, control = viewer
+    window.details_button.click()
     window.serial_button.click()
     control.reply("waiting", "/dev/ttyACM0", message=reason)
     window.refresh()

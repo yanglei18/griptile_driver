@@ -25,17 +25,22 @@ CONTACT_COLOR_STOPS = (
 )
 WEAK_RGB = CONTACT_COLOR_STOPS[0][1]
 STRONG_RGB = CONTACT_COLOR_STOPS[-1][1]
-_STOP_LEVELS, _STOP_COLORS = zip(*CONTACT_COLOR_STOPS)
-_CHANNELS = tuple(zip(*_STOP_COLORS))
+# The operator's contact map uses a fixed dark-to-blue-to-red scale. The
+# recorded RGB topic and its native palette remain independently decodable.
+CONTACT_MAP_STOPS = (
+    (0., (11, 17, 28)), (.10, (34, 69, 120)), (.25, (56, 102, 187)),
+    (.50, (136, 93, 182)), (.75, (207, 81, 129)), (1., (255, 93, 79)),
+)
 SURFACE_SCALE = 15  # An odd scale puts every measured center exactly on a display pixel.
 
 
-def _color_response(amplitude, valid, active, span):
+def _color_response(amplitude, valid, active, span, stops=CONTACT_COLOR_STOPS, unloaded=UNLOADED_RGB):
     pixels = np.empty((*amplitude.shape, 3), dtype=np.uint8)
-    pixels[:] = UNLOADED_RGB
+    pixels[:] = unloaded
     pixels[~valid] = INVALID_RGB
     strength = amplitude[active] / span
-    channels = [np.interp(strength, _STOP_LEVELS, channel) for channel in _CHANNELS]
+    levels, colors = zip(*stops)
+    channels = [np.interp(strength, levels, channel) for channel in zip(*colors)]
     pixels[active] = np.rint(np.column_stack(channels))
     return pixels
 
@@ -119,13 +124,22 @@ def contact_surface_rgb(amplitude, span) -> np.ndarray:
     strength. A neighborhood containing unknown data uses its nearest taxel
     instead of estimating a gradient across the missing measurements.
     """
+    return _surface_rgb(amplitude, span, CONTACT_COLOR_STOPS, UNLOADED_RGB)
+
+
+def contact_map_rgb(contact, span) -> np.ndarray:
+    """Color confirmed contact. Zero is quiet, NaN marks an unknown measurement."""
+    return _surface_rgb(contact, span, CONTACT_MAP_STOPS, CONTACT_MAP_STOPS[0][1])
+
+
+def _surface_rgb(amplitude, span, stops, unloaded):
     _check_span(span)
     values = _check_field(amplitude)
     valid = np.isfinite(values)
     active = values > 0
     # Handle uniform unloaded and unknown frames without interpolating an empty surface.
     if not active.any():
-        native = np.where(valid[..., None], UNLOADED_RGB, INVALID_RGB).astype(np.uint8)
+        native = np.where(valid[..., None], unloaded, INVALID_RGB).astype(np.uint8)
         return native.repeat(SURFACE_SCALE, axis=0).repeat(SURFACE_SCALE, axis=1)
 
     smooth = _bilinear(np.where(valid, values, 0))
@@ -140,7 +154,7 @@ def contact_surface_rgb(amplitude, span) -> np.ndarray:
         smooth[rows, cols] = nearest
         inside[rows, cols] = nearest > 0
         visible[rows, cols] = np.isfinite(nearest)
-    return _color_response(smooth, visible, inside, span)
+    return _color_response(smooth, visible, inside, span, stops, unloaded)
 
 
 def _contact_region(amplitude, thresholds, active_taxels):

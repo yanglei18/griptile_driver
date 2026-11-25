@@ -7,7 +7,8 @@ import pytest
 
 from griptile_core.assembler import Assembler
 from griptile_core.contact_image import (
-    CONTACT_COLOR_STOPS, INVALID_RGB, STRONG_RGB, UNLOADED_RGB, WEAK_RGB, amplitude_rgb, contact_surface_rgb,
+    CONTACT_COLOR_STOPS, CONTACT_MAP_STOPS, INVALID_RGB, STRONG_RGB, UNLOADED_RGB, WEAK_RGB,
+    amplitude_rgb, contact_map_rgb,
 )
 from griptile_core.grid import LAYOUT_ID
 from griptile_core.protocol import Block, PROTOCOL_ID
@@ -176,30 +177,59 @@ def test_compact_contact_screen_and_reference_action_follow_source_state(qt_app,
     from griptile_viewer.window import RAW_MODE, SURFACE_MODE
 
     model = ArrayView(SENSOR)
-    window = open_window(model, clock_ns=lambda: 0, request_reference=lambda *_: None)
+    requests = []
+    window = open_window(model, clock_ns=lambda: 0, request_reference=requests.append)
     size = window.size()
-    assert window.load_button.isVisible() and window.scale.isVisible()
-    assert window.serial_button.isVisible()
+    assert not any(w.isVisible() for w in (window.serial_button, window.load_button,
+                                            window.equalization_button, window.mode))
+    assert window.contact_print_button.isVisible() and window.scale.isVisible()
     assert window.brand.isVisible() and window.brand.text() == "GripTile"
     assert window.monitor.isAncestorOf(window.scale) and window.monitor.isAncestorOf(window.map)
     assert window.peak.isVisible() and window.peak.text() == "峰值 —"
-    assert not window.reference_button.isVisible() and not window.ref_status.text()
+    assert window.reference_button.isVisible() and not window.reference_button.isEnabled()
+    assert window.reference_button.text() == "空载归零" and not window.ref_status.text()
+    assert window.map_hint.isVisible() and "串口设置" in window.map_hint.text()
+    assert window.map_hint.geometry() == window.map.viewport().rect()
+    assert window.serial_dialog is None and window.load_dialog is None and window.equalization_dialog is None
     assert not window.details.isVisible() and not window.map.getAxis("left").isVisible()
     assert not window.marker.isVisible()
     compact_height = window.map.height()
     assert compact_height > window.height() * .75
 
-    model.accept(snapshot(Assembler(sensor_id=SENSOR), 1, START), 0)
+    assembler = Assembler(sensor_id=SENSOR)
+    state = snapshot(assembler, 1, START)
+    model.accept(state, 0)
     window.refresh()
-    assert window.reference_button.isVisible() and window.reference_button.isEnabled()
-    model.accept_reference(profile_status())
+    assert window.reference_button.isEnabled() and "已连接" in window.status.text()
+    assert "空载归零" in window.map_hint.text() and window.map_hint.isVisible()
+    window.reference_button.click()
+    assert requests == [None]
+    collecting = profile_status(phase="collecting")
+    collecting.progress = .4
+    model.accept_reference(collecting)
     window.refresh()
-    assert not window.reference_button.isVisible() and "就绪" in window.ref_status.text()
+    assert "40%" in window.ref_status.text() and "保持感应面空载" in window.map_hint.text()
+    assert not window.reference_button.isEnabled()
+    failed = profile_status(phase="failed")
+    failed.reason = "no_fresh_samples"
+    model.accept_reference(failed)
+    window.refresh()
+    assert "归零未完成" in window.map_hint.text() and window.reference_button.isEnabled()
+    ready = profile_status()
+    ready.header, ready.direction = state.header, "both"
+    model.accept_reference(ready)
+    state = snapshot(assembler, 2, START + 10_000_000)
+    model.accept(state, 0)
+    model.accept_response(response(state, np.zeros((20, 20))))
+    window.refresh()
+    assert window.reference_button.isEnabled() and "已归零" in window.ref_status.text()
+    assert not window.map_hint.isVisible()
 
     window.details_button.click()
     qt_app.processEvents()
     assert all(widget.isVisible() for widget in (window.mode, window.curve, window.png_button,
-                                                  window.reference_button, window.cell_label))
+                                                  window.reference_button, window.cell_label,
+                                                  window.serial_button, window.load_button, window.equalization_button))
     assert window.marker.isVisible() and window.map.getAxis("left").isVisible()
     window.mode.setCurrentIndex(RAW_MODE)
     window.refresh()
@@ -209,6 +239,11 @@ def test_compact_contact_screen_and_reference_action_follow_source_state(qt_app,
     assert window.mode.currentIndex() == SURFACE_MODE and window.scale.isVisible()
     assert not window.curve.isVisible() and not window.marker.isVisible()
     assert window.size() == size and window.map.height() == compact_height
+    model.service_error = "Sensor session or epoch changed"
+    window.refresh()
+    assert "未能设置空载参考" in window.statusBar().currentMessage()
+    assert model.service_error in window.legend.text()
+    assert "已归零" in window.ref_status.text() and not window.map_hint.isVisible()
 
 
 def test_compact_display_fits_the_entire_square_array_when_resized(qt_app, open_window):
@@ -225,10 +260,32 @@ def test_compact_display_fits_the_entire_square_array_when_resized(qt_app, open_
         assert field.left() >= -1 and field.right() <= screen.width() + 1
         assert field.top() >= -1 and field.bottom() <= screen.height() + 1
         # The acquisition and inspection controls remain reachable in either orientation.
-        for button in (window.serial_button, window.load_button, window.details_button):
+        for button in (window.reference_button, window.contact_print_button, window.details_button):
             assert button.isVisibleTo(window)
             rect = button.rect().translated(button.mapTo(window, button.rect().topLeft()))
             assert window.rect().contains(rect)
+
+
+def test_contact_guide_leaves_raw_inspection_and_recorded_rgb_visible(open_window):
+    from griptile_viewer.window import CONTACT_MODE, RAW_MODE
+
+    model = ArrayView(SENSOR, replay=True)
+    window = open_window(model, clock_ns=lambda: 0)
+    assert window.map_hint.isVisible() and "回放" in window.map_hint.text()
+    window.details_button.click()
+    assert not window.serial_button.isVisible() and not window.equalization_button.isVisible()
+    state = snapshot(Assembler(sensor_id=SENSOR), 1, START)
+    model.accept(state, 0)
+    window.refresh()
+    assert "回放" in window.map_hint.text() and "空载参考" in window.map_hint.text()
+    window.mode.setCurrentIndex(RAW_MODE)
+    window.refresh()
+    assert not window.map_hint.isVisible()
+    model.accept_reference(profile_status())
+    model.accept_image(image(state, np.full((20, 20, 3), 111, dtype=np.uint8)))
+    window.mode.setCurrentIndex(CONTACT_MODE)
+    window.refresh()
+    assert not window.map_hint.isVisible()
 
 
 def response(state, amplitude, *, bigendian=False):
@@ -375,7 +432,7 @@ def test_hidden_array_waits_for_navigation_or_export_without_stalling_load_tool(
     path = tmp_path / "hidden-array.png"
     window.save_png(path)
     image = QtGui.QImage(str(path))
-    assert image.pixelColor(150, 150).getRgb()[:3] == tuple(amplitude_rgb(field, 3000.)[0, 0])
+    assert image.pixelColor(150, 150).getRgb()[:3] == CONTACT_MAP_STOPS[3][1]
     assert not window.map.isVisible()
 
     now += 50_000_000
@@ -385,7 +442,7 @@ def test_hidden_array_waits_for_navigation_or_export_without_stalling_load_tool(
     model.accept_response(response(state, field))
     window.contact_print_page.back_button.click()
     assert window.map.isVisible()
-    np.testing.assert_array_equal(window.image.image, contact_surface_rgb(field, 3000.))
+    np.testing.assert_array_equal(window.image.image, contact_map_rgb(field, 3000.))
     assert "峰值 2300 ADC" in window.load_dialog.live.text()
 
 
@@ -461,6 +518,36 @@ def test_empty_source_scan_between_press_and_release_breaks_capture():
     assert model.contact_prints.latest is None
 
 
+def test_contact_map_retains_only_same_contact_during_light_release():
+    model = ArrayView(SENSOR)
+    assembler = Assembler(sensor_id=SENSOR)
+    initial = snapshot(assembler, 1, START)
+    status = profile_status()
+    status.header, status.direction = initial.header, "both"
+    model.accept(initial, 0)
+    model.accept_reference(status)
+
+    def observe(seq, amplitude):
+        now = (seq - 1) * 20_000_000
+        state = snapshot(assembler, seq, START + now)
+        field = np.zeros((20, 20), np.float32)
+        field[7, 8] = amplitude
+        field[12, 12] = 12  # Above the support threshold but never first activated.
+        model.accept(state, now)
+        model.accept_response(response(state, field))
+        model.update_contact_print(now)
+        confirmed, _ = model.contact_surface_inputs(now, confirmed_only=True)
+        assert confirmed[12, 12] == 0 and model.contact_response(now)[12, 12] == 12
+        return confirmed[7, 8]
+
+    assert observe(2, 90) == 90
+    assert observe(3, 12) == 12
+    assert observe(4, 5) == 0
+    assert observe(5, 12) == 0
+    stale, _ = model.contact_surface_inputs(1_000_000_000, confirmed_only=True)
+    assert np.isnan(stale).all()
+
+
 def test_contour_is_a_display_layer_bound_to_the_measured_reference(open_window, tmp_path):
     from griptile_viewer.window import CONTACT_MODE, RAW_MODE, SURFACE_MODE, QtGui
 
@@ -476,6 +563,7 @@ def test_contour_is_a_display_layer_bound_to_the_measured_reference(open_window,
     field = np.zeros((20, 20), dtype=np.float32)
     field[4:6, 6:9] = 16
     field[4, 6] = 180
+    field[15, 15] = 16  # Isolated activity has no contact seed.
     model.accept(pressed, now)
     model.accept_response(response(pressed, field))
     window = open_window(model, clock_ns=lambda: now)
@@ -500,7 +588,9 @@ def test_contour_is_a_display_layer_bound_to_the_measured_reference(open_window,
     assert drawn()
     path = tmp_path / "surface.png"
     window.save_png(path)
-    np.testing.assert_array_equal(pixels(QtGui.QImage(str(path))), contact_surface_rgb(field, status.span_adc))
+    confirmed = field.copy()
+    confirmed[15, 15] = 0.
+    np.testing.assert_array_equal(pixels(QtGui.QImage(str(path))), contact_map_rgb(confirmed, status.span_adc))
     np.testing.assert_array_equal(model.contact_response(now), field)
     for mode in (CONTACT_MODE, RAW_MODE):
         window.mode.setCurrentIndex(mode)
@@ -537,6 +627,8 @@ def test_live_native_uses_matched_response_and_recorded_rgb_retains_its_own_colo
     first = snapshot(assembler, 1, START)
     model.accept(first, 0)
     status = profile_status()
+    status.header = SimpleNamespace(frame_id=SENSOR, stamp=SimpleNamespace(sec=1, nanosec=0))
+    status.direction = "both"
     status.span_adc = 1800.
     model.accept_reference(status)
     original = np.full((20, 20, 3), 255, np.uint8)
@@ -545,7 +637,7 @@ def test_live_native_uses_matched_response_and_recorded_rgb_retains_its_own_colo
     model.accept_image(image(first, original))
     field = np.zeros((20, 20), dtype=np.float32)
     field[0, 0] = 0.05 * status.span_adc
-    field[9, 9] = .01  # Visible strength is near zero; the measured contact is still counted.
+    field[9, 9] = .01  # Retained in the native diagnostic response.
     field[1, 0] = np.nan
     # This unpaired field must never color pixels at the earlier acquisition stamp.
     following = snapshot(assembler, 2, START + 40_000_000)
@@ -567,7 +659,9 @@ def test_live_native_uses_matched_response_and_recorded_rgb_retains_its_own_colo
     assert window.scale.isVisible() == (not replay)
     window.mode.setCurrentIndex(SURFACE_MODE)
     window.refresh()
-    np.testing.assert_array_equal(window.image.image[7::15, 7::15], native)
+    confirmed = field.copy()
+    confirmed[9, 9] = 0.
+    np.testing.assert_array_equal(window.image.image, contact_map_rgb(confirmed, status.span_adc))
     assert window.scale.isVisible() and not window.source_scale.isVisible()
     now = 100_000_001
     window.mode.setCurrentIndex(CONTACT_MODE)
@@ -630,6 +724,8 @@ def test_continuous_mode_png_selection_coordinates_and_native_export(open_window
     state = snapshot(assembler, 1, START)
     model.accept(state, 0)
     status = profile_status()
+    status.header = SimpleNamespace(frame_id=SENSOR, stamp=SimpleNamespace(sec=1, nanosec=0))
+    status.direction = "both"
     status.span_adc = 2000.
     model.accept_reference(status)
     field = np.zeros((20, 20), dtype=np.float32)
@@ -650,13 +746,15 @@ def test_continuous_mode_png_selection_coordinates_and_native_export(open_window
     window.refresh()
     assert window.scale.isVisible()
     assert window.peak.text() == "局部峰值 120%"
-    assert f"有响应 {len(levels)} 点" in window.legend.text() and "399/400" in window.legend.text()
+    assert f"接触 {len(levels) - 1} 点" in window.legend.text() and "399/400" in window.legend.text()
     original = window.image.image
     assert original.shape == (300, 300, 3)
-    np.testing.assert_array_equal(original[7::15, 7::15], native)
+    confirmed = field.copy()
+    confirmed[3, swatches.start] = 0.
+    np.testing.assert_array_equal(original, contact_map_rgb(confirmed, status.span_adc))
     np.testing.assert_array_equal(native[3, swatches], [rgb for _, rgb in CONTACT_COLOR_STOPS])
     gradient = window.scale.findChild(QtWidgets.QFrame, "contactGradient").grab().toImage()
-    for position, rgb in CONTACT_COLOR_STOPS:
+    for position, rgb in CONTACT_MAP_STOPS:
         x = round(position * (gradient.width() - 1))
         swatch = gradient.pixelColor(x, gradient.height() // 2).getRgb()[:3]
         np.testing.assert_allclose(swatch, rgb, atol=4)
@@ -821,6 +919,7 @@ def test_live_equalization_changes_only_displayed_contact_strength(open_window, 
     load = model.load_observation(now)
     window = open_window(model, clock_ns=lambda: now)
     window.equalization = EqualizationSettings(model, tmp_path)
+    window.details_button.click()
     window.equalization_button.click()
     assert window.equalization_dialog.isVisible()
     window.refresh()
@@ -828,7 +927,7 @@ def test_live_equalization_changes_only_displayed_contact_strength(open_window, 
     profile = EqualizationProfile("both", (100., 200.) * 200, (150., 300.) * 200)
     window.equalization.adopt(profile, sample.context)
     corrected = apply_equalization(amplitude, profile)
-    for mode, render in ((SURFACE_MODE, contact_surface_rgb), (CONTACT_MODE, amplitude_rgb)):
+    for mode, render in ((SURFACE_MODE, contact_map_rgb), (CONTACT_MODE, amplitude_rgb)):
         window.mode.setCurrentIndex(mode)
         window.refresh()
         np.testing.assert_array_equal(window.image.image, render(corrected, status.span_adc))

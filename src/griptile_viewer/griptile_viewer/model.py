@@ -5,7 +5,7 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-from griptile_core.contact_image import INVALID_RGB
+from griptile_core.contact_image import INVALID_RGB, contact_footprint
 from griptile_core.display_response import ReferenceProfile
 from griptile_core.grid import CELL_COUNT, COLS, LAYOUT_ID, ROWS, SHAPE, normalize_state
 from griptile_core.identity import validate_sensor_id
@@ -239,17 +239,22 @@ class ArrayView:
         amplitude, _ = self._response_with_state(clock_ns, allow_rgb_fallback=allow_rgb_fallback)
         return amplitude
 
-    def contact_surface_inputs(self, clock_ns):
-        """Pair measured amplitudes with the active noise thresholds for contouring."""
+    def contact_surface_inputs(self, clock_ns, *, confirmed_only=False):
+        """Pair response and thresholds, optionally retaining only measured contact."""
         amplitude, state = self._response_with_state(clock_ns)
         context = self.load_context
         if state is None or context is None:
-            return amplitude, None
+            return (np.full_like(amplitude, np.nan) if confirmed_only else amplitude), None
         rows = self._rows_after_reference(state, context)
-        if not rows.any():
-            return amplitude, None
         thresholds = np.asarray(self.reference.activation_threshold_adc).reshape(SHAPE)
-        return amplitude, np.where(rows[:, None] & np.isfinite(amplitude), thresholds, np.nan)
+        known = rows[:, None] & np.isfinite(amplitude)
+        thresholds = np.where(known, thresholds, np.nan)
+        if confirmed_only:
+            stamp = state.header.stamp.sec * 1_000_000_000 + state.header.stamp.nanosec
+            seeds = self.contact_prints.active_taxels_at(stamp) if self._print_context is context else None
+            footprint = contact_footprint(amplitude, thresholds, seeds)
+            amplitude = np.where(known, np.where(footprint, amplitude, 0.), np.nan)
+        return amplitude, thresholds
 
     def update_contact_print(self, clock_ns, profile=None):
         """Feed each new measured scan once, independent of Qt refresh or DDS arrival order."""

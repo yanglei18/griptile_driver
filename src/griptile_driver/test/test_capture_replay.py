@@ -24,7 +24,8 @@ from griptile_driver.ros_messages import batch_from_message, sample_message
 
 
 @pytest.fixture
-def context():
+def context(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     ros = Context()
     rclpy.init(context=ros, domain_id=193, args=[])
     try:

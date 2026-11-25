@@ -1,13 +1,9 @@
 """Operator exports. A snapshot preserves source times and display freshness."""
 
 import csv
-import json
-import os
-from pathlib import Path
-import tempfile
 
-from griptile_core.display_response import ReferenceProfile
 from griptile_core.grid import ROWS, COLS
+from griptile_core.reference_file import load_reference_file, save_json_atomic
 
 
 def save_reference(view, path):
@@ -18,34 +14,12 @@ def save_reference(view, path):
     save_json_atomic(path, document)
 
 
-def save_json_atomic(path, document):
-    """Publish a complete local JSON export, including when replacing an old file."""
-    destination = Path(path)
-    temporary = None
-    try:
-        with tempfile.NamedTemporaryFile("w", dir=destination.parent, encoding="utf-8",
-                                         delete=False) as stream:
-            temporary = Path(stream.name)
-            json.dump(document, stream, ensure_ascii=False, allow_nan=False, indent=2)
-            stream.write("\n")
-        os.replace(temporary, destination)
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
-
-
 def load_reference(view, path):
     binding = view.binding()
     if not binding or view.message is None or not view.message.connected:
         raise ValueError("加载参考需要已连接且具有可核验标识的传感器")
-    with open(path, "rb") as stream:
-        raw = stream.read(131073)
-    if len(raw) > 131072:
-        raise ValueError("参考文件过大")
-    doc = json.loads(raw)
-    if not isinstance(doc, dict) or doc.get("version") != 1 or doc.get("binding") != binding:
-        raise ValueError("参考文件与当前传感器、协议或布局不匹配")
-    return ReferenceProfile.from_dict(doc.get("reference"))
+    return load_reference_file(path, binding, getattr(view.current_reference, "direction", None),
+                               allow_legacy=True)
 
 
 def save_snapshot(view, path, clock_ns):

@@ -16,8 +16,12 @@ from griptile_msgs.srv import SetContactReference
 class ContactImaging:
     """Own contact detection, source-bound calibration and presentation together."""
 
-    def __init__(self, node, sensor_id, *, image_events=None):
+    def __init__(self, node, sensor_id, *, image_events=None, reference_cache=None):
         self.sensor_id = sensor_id
+        self.reference_cache = reference_cache
+        self._logger = node.get_logger()
+        self._cache_checked = False
+        self._save_binding = None
         startup = ParameterDescriptor(read_only=True)
         span = node.declare_parameter("contact_span_adc", DEFAULT_CONTACT_SPAN, startup).value
         direction = node.declare_parameter("contact_direction", "both", startup).value
@@ -49,12 +53,32 @@ class ContactImaging:
     @property
     def hardware_id(self):
         info = self.info
-        if (info is not None and info.connected and info.sensor_id == self.sensor_id
+        if (info is not None and info.schema_version == 1 and info.connected
+                and info.sensor_id == self.sensor_id
                 and self.identity == (info.session_id, info.stream_epoch)
                 and info.protocol_id == PROTOCOL_ID and info.layout_id == LAYOUT_ID
                 and info.rows == ROWS and info.cols == COLS and info.unit == "adc_counts"):
             return info.hardware_id
         return ""
+
+    def _cache_binding(self):
+        hardware_id = self.hardware_id
+        if self.reference_cache is not None and hardware_id:
+            return dict(sensor_id=self.sensor_id, hardware_id=hardware_id,
+                        protocol_id=PROTOCOL_ID, layout_id=LAYOUT_ID)
+        return None
+
+    def _try_cached_reference(self, now):
+        binding = self._cache_binding()
+        if binding is None:
+            return  # Matching device metadata may arrive after its first rows.
+        self._cache_checked = True
+        try:
+            profile = self.reference_cache.load(binding, self.settings.direction)
+            if profile is not None:
+                self.processor.load_reference(profile, self.identity, now)
+        except (ValueError, OSError) as exc:
+            self._logger.warning(f"Cannot reuse saved unloaded reference: {exc}")
 
     def update_info(self, info):
         previous = self.hardware_id
@@ -72,6 +96,8 @@ class ContactImaging:
         self.processor.configure(display_range_adc=self.settings.display_range_adc, direction=self.settings.direction)
         self.recorded_phase = None
         self.recorded_hardware_id = ""
+        self._cache_checked = False
+        self._save_binding = None
 
     def reset_timeline(self, reason):
         """Invalidate the latched reference even if a seek never produces another row."""
@@ -125,8 +151,12 @@ class ContactImaging:
             self.processor.cancel_reference(state.reason or "no_fresh_samples")
         else:
             now = state.snapshot_monotonic_ns
+            if (self.reference_cache is not None and not self._cache_checked
+                    and self.processor.status.phase == "unreferenced"):
+                self._try_cached_reference(now)
             if self.auto_capture and not self.started_auto:
-                self.processor.begin_reference(self.identity, now)
+                if self.processor.status.phase == "unreferenced":
+                    self.processor.begin_reference(self.identity, now)
                 self.started_auto = True
             if self.processor.status.phase == "collecting":
                 stamps = np.repeat(state.row_monotonic_ns, COLS)
@@ -159,6 +189,10 @@ class ContactImaging:
                     raise ValueError("Reference collection already in progress")
                 self.processor.begin_reference(self.identity, now)
             self.recorded_hardware_id = ""
+            # Persist only explicitly acquired/imported profiles, and only for
+            # hardware already identified when the operator made the request.
+            self._save_binding = self._cache_binding()
+            self._cache_checked = True
             self.started_auto = True
             self.recorded_phase = None
             self._published_reference = None  # A ready profile can directly replace another.
@@ -195,6 +229,8 @@ class ContactImaging:
     def _report(self):
         status = self.processor.status
         phase, progress, reason = self.recorded_phase or (status.phase, status.progress, status.reason)
+        if self.reference_cache is not None and phase == "ready" and status.reference_source == "saved":
+            reason = "saved_reference"
         key = (self.identity, self.hardware_id, phase, progress, reason)
         if key == self._published_reference:
             return
@@ -211,5 +247,11 @@ class ContactImaging:
             msg.baseline_adc = profile.baseline_adc
             msg.activation_threshold_adc = profile.activation_threshold_adc
             msg.valid_mask = profile.valid_mask
+            binding, self._save_binding = self._save_binding, None
+            if binding is not None and binding == self._cache_binding():
+                try:
+                    self.reference_cache.save(binding, self.settings.direction, profile)
+                except (OSError, ValueError) as exc:
+                    self._logger.warning(f"Unloaded reference ready for this session; cannot save it: {exc}")
         self.reference_publisher.publish(msg)
         self._published_reference = key

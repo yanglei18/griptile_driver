@@ -304,7 +304,7 @@ def test_recorded_reference_rebuilds_native_contact_image(tmp_path, monkeypatch)
 def test_known_load_window_uses_the_drivers_unclipped_samples(qt_app, open_window, tmp_path, monkeypatch):
     """Send wire data through the installed launch, zero service and actual Qt hold buttons."""
     import numpy as np
-    from griptile_core.contact_image import SURFACE_SCALE, amplitude_rgb, contact_intensity_rgb
+    from griptile_core.contact_image import CONTACT_MAP_STOPS, SURFACE_SCALE, amplitude_rgb
     from griptile_viewer.app import ViewerNode
     from griptile_viewer.window import QtWidgets, SURFACE_MODE
 
@@ -322,7 +322,7 @@ def test_known_load_window_uses_the_drivers_unclipped_samples(qt_app, open_windo
     pending = b""
     next_scan = next_draw = 0.0
 
-    def feed(delta, predicate):
+    def feed(delta, predicate, *, weak_points=False):
         nonlocal pending, next_scan, next_draw
         matrix = idle.copy()
         # With a stable zero, each active taxel subtracts its 1.5-count noise floor.
@@ -330,6 +330,10 @@ def test_known_load_window_uses_the_drivers_unclipped_samples(qt_app, open_windo
             sign = 1 if delta > 0 else -1
             matrix[4, 8] += delta + sign * 2
             matrix[12, 3] += delta + sign
+        if weak_points:
+            # Identical 6.5-count responses, one beside the strong contact and one isolated.
+            matrix[4, 9] += 8
+            matrix[17, 16] += 8
         scan = b"".join(PACKET.pack(b"\xa5\x5a", row, *values) for row, values in enumerate(matrix))
         deadline = time.monotonic() + 15.0
         while time.monotonic() < deadline:
@@ -355,6 +359,11 @@ def test_known_load_window_uses_the_drivers_unclipped_samples(qt_app, open_windo
         sample = node.model.load_observation(node.view_clock())
         return sample is not None and sample.total_adc == value
 
+    def map_colors(values):
+        levels, colors = zip(*CONTACT_MAP_STOPS)
+        channels = [np.interp(values / 3000., levels, channel) for channel in zip(*colors)]
+        return np.rint(np.stack(channels, axis=-1)).astype(np.uint8)
+
     try:
         with running(["ros2", "launch", "griptile_driver", "sensor.launch.py", "port:=" + port],
                      tmp_path / "known-load-driver.log"):
@@ -364,27 +373,41 @@ def test_known_load_window_uses_the_drivers_unclipped_samples(qt_app, open_windo
             # Exercise the main display with the same installed driver and data a CV
             # subscriber sees, including a value above the display's red endpoint.
             assert window.mode.currentIndex() == SURFACE_MODE and not window.details.isVisible()
-            for delta, peak in [(6, "<1%"), (30, "1%"), (3300, "110%"), (0, "0%")]:
-                feed(delta, lambda: total_is(2 * delta))
+            for delta, peak in [(6, "0%"), (30, "1%"), (3300, "110%"), (0, "0%")]:
                 adc = idle.copy()
                 field = np.zeros((20, 20), np.float32)
+                contact = np.zeros_like(field)
                 if delta:
                     adc[4, 8], adc[12, 3] = 18000 + delta + 2, 18000 + delta + 1
                     field[4, 8], field[12, 3] = delta + .5, delta - .5
+                if delta >= 30:
+                    contact[:] = field
+                if delta == 30:
+                    adc[4, 9] += 8
+                    adc[17, 16] += 8
+                    field[4, 9] = field[17, 16] = 6.5
+                    contact[4, 9] = 6.5
+                expected_cv = amplitude_rgb(field, 3000)
+                feed(delta, lambda: total_is(float(field.sum())) and np.array_equal(
+                    node.model.contact_pixels(node.view_clock()), expected_cv), weak_points=delta == 30)
                 np.testing.assert_array_equal(np.asarray(node.model.message.adc).reshape(20, 20), adc)
                 measured = node.model.contact_response(node.view_clock())
                 assert measured.dtype == np.float32
                 np.testing.assert_array_equal(measured, field)
                 center = SURFACE_SCALE // 2
                 np.testing.assert_array_equal(window.image.image[center::SURFACE_SCALE, center::SURFACE_SCALE],
-                                              amplitude_rgb(field, 3000))
+                                              map_colors(contact))
                 assert window.peak.text() == f"峰值 {peak}"
-                # The driver-calibrated threshold for these two taxels is 3 ADC.
-                # A 6-count contact remains colored but has no strong outline seed.
+                # The original image and 32FC1 field retain weak isolated responses.
+                # The map and its outline use the same confirmed contact area.
                 outlined = window.contour_image.isVisible() and bool(np.any(window.contour_image.image))
                 assert outlined == (delta >= 30)
+            assert not window.load_button.isVisible()
+            window.details_button.click()
+            assert window.load_button.isVisible()
             window.load_button.click()
             dialog = window.load_dialog
+            assert dialog.isVisible()
             dialog.check_force.setValue(2)
             dialog.calibration_force.setValue(4)
             for delta, next_stage in [(2000, "calibration"), (4000, "check_down"),
@@ -392,7 +415,7 @@ def test_known_load_window_uses_the_drivers_unclipped_samples(qt_app, open_windo
                 feed(delta, lambda: total_is(2 * abs(delta)) and dialog.capture_button.isEnabled())
                 center = SURFACE_SCALE // 2
                 pixel = window.image.image[4 * SURFACE_SCALE + center, 8 * SURFACE_SCALE + center]
-                assert tuple(pixel) == contact_intensity_rgb(abs(delta) + 0.5, 3000)
+                np.testing.assert_array_equal(pixel, map_colors(abs(delta) + 0.5))
                 dialog.capture_button.click()
                 feed(delta, lambda: dialog.trial is not None and dialog.trial.stage == next_stage)
 
@@ -423,6 +446,8 @@ def test_known_load_window_uses_the_drivers_unclipped_samples(qt_app, open_windo
 def test_serial_controls_switch_live_ports_and_clear_the_reference(qt_app, open_window, tmp_path, monkeypatch):
     """Configure an initially idle installed driver from Qt, using two distinct PTYs."""
     import termios
+    import numpy as np
+    from griptile_core.contact_image import INVALID_RGB, CONTACT_MAP_STOPS
     from griptile_viewer.app import ViewerNode
 
     monkeypatch.setenv("ROS_DOMAIN_ID", str(138 + os.getpid() % 15))
@@ -448,6 +473,9 @@ def test_serial_controls_switch_live_ports_and_clear_the_reference(qt_app, open_
         cleanup.callback(node.destroy_node)
         window = open_window(node.model, node.view_clock, node.request_reference,
                              serial_control=node.serial_control)
+        assert not window.serial_button.isVisible()
+        window.details_button.click()
+        assert window.serial_button.isVisible()
         window.serial_button.click()
         dialog = window.serial_dialog
         assert dialog.isVisible()
@@ -502,6 +530,11 @@ def test_serial_controls_switch_live_ports_and_clear_the_reference(qt_app, open_
         window.reference_button.click()
         wait_for("first array zero", lambda: node.model.load_observation(node.view_clock()) is not None,
                  master_a, scan_a)
+        assert np.all(window.image.image == CONTACT_MAP_STOPS[0][1]) and window.peak.text() == "峰值 0%"
+        wait_for("connected array with stale rows", lambda: node.model.message.connected
+                 and not node.model.mask(node.view_clock()).any() and window.map_hint.isVisible())
+        assert np.all(window.image.image == INVALID_RGB) and window.peak.text() == "峰值 —"
+        assert not window.contour_image.isVisible()
 
         dialog.port.setEditText(str(tmp_path / "missing-port"))
         assert dialog.connect_button.isEnabled()
@@ -521,6 +554,8 @@ def test_serial_controls_switch_live_ports_and_clear_the_reference(qt_app, open_
         dialog.disconnect_button.click()
         wait_for("array disconnected", lambda: not node.model.message.connected
                  and not node.model.mask(node.view_clock()).any())
+        assert np.all(window.image.image == INVALID_RGB) and window.peak.text() == "峰值 —"
+        assert "已断开" in window.status.text() and window.map_hint.isVisible()
         os.close(os.open(second, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK))
         select_port(first, 115200)
         wait_for("first array reconnected", lambda: all_cells(12345), master_a, scan_a)

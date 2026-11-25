@@ -1,10 +1,6 @@
 # griptile_driver
 
-A ROS 2 driver and a 2D viewer for one USB serial gripper tactile array. Each taxel maps to one RGB pixel. See where the gripper touches an object, how many cells respond and how response varies across its contact footprint. The driver owns the serial device and ROS subscribers share its output. [中文说明](../README.md)
-
-![Simulated release, light and firm contact on the same ring, and two separate pads on the continuous display](contact-footprints.png)
-
-[Native 20×20 RGB example](contact-ring.png) · [Qt window](viewer-demo.png)
+A ROS 2 driver and viewer for a single USB serial gripper tactile array. The main display shows the position, extent and relative strength of contact across 20×20 taxels. The contact print shows how the footprint changes during clamping and release. The driver owns the serial device and shares its data with all subscribers. [中文说明](../README.md)
 
 ## Build and run
 
@@ -17,33 +13,37 @@ colcon build --base-paths src
 source install/setup.bash
 ```
 
-Source both setup files in each new terminal. Run the full driver and viewer on a simulated sensor without hardware. Press Ctrl+C to stop.
-
-```bash
-python3 examples/demo.py
-```
-
-To use a physical array, launch the driver and viewer, open **串口设置** (Serial settings), choose a device on the acquisition host or type its path, and click **连接** (Connect). The default baud rate is 115200. The dialog lists Linux by-id aliases when available and distinguishes an open port from a sensor streaming valid data. [Serial settings window](serial-settings.png)
+Source both setup files in each new terminal. With a physical sensor, launch the driver and viewer.
 
 ```bash
 ros2 launch griptile_driver sensor.launch.py gui:=true
 ```
 
-The dialog can refresh the list, switch ports and disconnect. Changing connections starts a new acquisition session. You can also select a port at startup with `port:=/dev/ttyUSB0 baudrate:=115200`. Omit `gui:=true` for headless acquisition. On a headless installation use `--from-paths src/griptile_{core,msgs,driver}` with rosdep and build with `colcon build --base-paths src --packages-up-to griptile_driver`.
+1. **Connect.** Open **详情 → 串口设置** (Details → Serial settings), select a device on the acquisition host or enter its path, check the baud rate (115200 by default), and click **连接** (Connect). Wait for **已连接** on the main display. You can also specify `port:=/dev/ttyUSB0 baudrate:=115200` at startup.
+2. **Zero the unloaded array.** If the display shows **已归零**, the array is ready. If it shows **待归零**, open the gripper, clear the sensing face, click **空载归零**, and keep the face unloaded for about three seconds. If zeroing fails, wait for fresh readings and click the same button with the face unloaded.
+3. **Observe contact.** Collapse Details. Lightly grip an object, tighten, then release. The main map keeps the same coordinates throughout. Select **触印** (Contact print) to inspect the shape of individual patches, holes and changes over time.
 
-Expand **详情** for view selection, cell traces and exports. The array uses row and column addresses 0–19, with row zero at the top and column zero at the left. Open the gripper, unload the surface and click the three-second reference button. Once the reference is ready, light blue-gray pixels indicate measured cells with no detected contact. The first positive color step is one RGB code from the background. Increasing response moves through pale blue to cyan at 20% of the display span, then green, yellow, orange and red. Gray pixels indicate missing reference or stale data. The demo supplies unloaded samples until the driver confirms the reference, then cycles through a ring, release and two separate contact patches.
+The acquisition host saves successful manual reference captures and imports for verified devices. On reconnect it looks for a reference matching the sensor ID, hardware identity, protocol, layout and response direction. An unidentified device can use a reference acquired for the current connection. To take a new zero, clear the sensing face and click **空载归零** again. Port discovery, switching and disconnect are available under Serial settings. [Serial settings window](serial-settings.png)
 
-The live viewer uses source-matched scalar responses to color both contact views. Archived RGB images retain their original colors. [Compare the same inputs from zero to light contact](contact-onset.png).
+Without hardware, run `python3 examples/demo.py` from the repository root. The simulated sensor supplies unloaded samples until the reference is ready, then cycles through a ring, release and two separate patches on `/tactile/demo`. Press Ctrl+C to stop.
 
-The native **接触图 RGB** view magnifies the pixels with nearest-neighbor sampling. Contact-mode PNG export writes the original 20×20 RGB image. The contact footprint counts responding cells; conversion to physical area requires sensor dimensions. Intensity is a noise-gated ADC change; force or pressure units require physical calibration. Raw ADC and signed delta views, per-cell traces and CSV export remain available. Saved references can be reused with a verified matching device and layout.
+### Read the contact map
 
-The live window opens on a square **连续接触面（估算）** display with its fixed color scale. The peak readout gives the strongest available taxel response as a percentage of the display span. A driver with a ready unloaded reference can be used immediately. The surface renders the same 400 taxels at 300×300 RGB. The viewer interpolates noise-gated ADC amplitudes between neighboring taxel centers and estimates the contact outline from their active flags. Unknown regions stay gray. Colors at all 400 measured centers match the native grid. Picking and time series use the original addresses. The response count includes every taxel with a positive response, including weak signals. The surface view exports a 300×300 PNG. Both views share the same unloaded reference.
+The default **连续接触面（估算）** (Continuous contact surface) shows the full 20×20 array at a fixed scale. The color scale stays fixed as you grip and release.
 
-**详情 → 接触轮廓** (Contact outline) defaults to on. Thin lines trace the supported outer edges and holes on the continuous surface. On each frame, cells reaching eight times their individual unloaded activation thresholds seed a region. The region extends through four-connected cells reaching twice their own thresholds. Weak isolated touches still appear in the underlying color image. Boundaries stay open next to missing measurements. PNG exports contain the original color image. [Live viewer example](viewer-demo.png)
+| Color on the main display | Meaning |
+| --- | --- |
+| Dark blue-black | A valid reading with no detected contact |
+| Blue → purple → red | Strength within a detected contact patch. The scale reaches red at 3000 ADC counts by default |
+| Gray | Missing reference coverage or stale readings leave the contact state unknown |
 
-![Native and interpolated views of the same simulated ring and three broad ridges](contact-surface-comparison.png)
+The peak next to the color scale reports the strongest detected taxel as a percentage of the display span. The 300×300 surface and its PNG export interpolate between the measured taxels within the supported footprint. A partially measured rim appears as an arc. **详情 → 接触轮廓** shows or hides the outline of the same footprint. The PNG contains the colored surface, with the thin outline shown on screen.
 
-The three RGB channels encode one tactile response per taxel. The same response always receives the same color across frames. The red endpoint defaults to 3000 noise-gated ADC counts. Set `contact_span_adc:=6000.0` to extend the range. The default `contact_direction:=both` accepts either sign of ADC change. Select `increase` or `decrease` when the pressure polarity is known. All subscribers share the driver's unloaded reference. From a headless terminal with the gripper unloaded, request it with the command below.
+To see weaker individual readings, select **详情 → 接触图 RGB**. This native 20×20 RGB view uses a light blue-gray unloaded color, progressing through pale blue, cyan, green, yellow, orange and red. Row 0 and column 0 meet at the top left. This mode exports a 20×20 RGB PNG and uses the source image colors during replay. Raw ADC, signed ΔADC, per-cell traces and CSV export are also available in Details. [Native 20×20 RGB example](contact-ring.png)
+
+Set `contact_span_adc:=6000.0` to extend the display range. The default `contact_direction:=both` accepts either sign of ADC change. Select `increase` or `decrease` when the pressure polarity is known. Colors represent sensor response. Force in newtons requires load calibration, and physical contact area requires taxel spacing.
+
+For headless acquisition, omit `gui:=true`. You can install the driver dependencies with rosdep's `--from-paths src/griptile_{core,msgs,driver}` option and build with `colcon build --base-paths src --packages-up-to griptile_driver`. With the gripper unloaded, request a reference from the terminal.
 
 ```bash
 ros2 service call /tactile/sensor_0/set_contact_reference griptile_msgs/srv/SetContactReference '{}'
@@ -75,7 +75,7 @@ The live viewer matches the native 20×20 scalar response to its source state an
 
 ### Match taxel colors under equal local pressure
 
-Open **阵元标定** in the live viewer and reuse the ready unloaded reference. Cover the entire 20×20 array with a uniform-pressure bladder or a fixture with independently established pressure uniformity. Keep the mounting and contact surface fixed. A cap rim, finger or total force reading alone cannot establish equal local pressure.
+Open **详情 → 阵元标定** in the live viewer and reuse the ready unloaded reference. Cover the entire 20×20 array with a uniform-pressure bladder or a fixture with independently established pressure uniformity. Keep the mounting and contact surface fixed. A cap rim, finger or total force reading alone cannot establish equal local pressure.
 
 1. Apply a lower uniform pressure, let it settle, click **采集第一档**, and hold for about one second. This determines a sensitivity factor for each taxel.
 2. Increase pressure across the face. Once steady, click **采集验证档**. This independent check requires at least a 25% higher median response and reports the spread across all 400 taxels before and after correction, plus the largest corrected deviation.
@@ -87,7 +87,7 @@ The factors adjust colors in both live contact views and the main peak indicator
 
 ### Check the display against a known load
 
-Align a force gauge with the normal to the sensing face and keep the indenter and its position fixed. Open **已知载荷验证** in the live viewer. Reuse the current unloaded reference, or acquire one with the jaw open. Enter two gauge readings in newtons, a lower independent check load and a higher calibration load.
+Align a force gauge with the normal to the sensing face and keep the indenter and its position fixed. Open **详情 → 已知载荷验证** in the live viewer. Reuse the current unloaded reference, or acquire one with the jaw open. Enter two gauge readings in newtons, a lower independent check load and a higher calibration load.
 
 | Hold | Gauge reading | Use |
 | --- | --- | --- |
@@ -96,7 +96,7 @@ Align a force gauge with the normal to the sensing face and keep the indenter an
 | Unload partway | Same lower check load | Check the estimate on unloading against the gauge and the loading reading |
 | Release | Zero | Measure the residual after release |
 
-Follow the single action shown for each step and capture when the gauge reaches the target. The high calibration load requires a stable hold. Independent checks retain the first complete measurement window and its variation, including fluctuations on release. A gap in acquisition restarts the current sampling window. The window estimates total normal force on this sensor face from the sum of the 400 native noise-gated responses. The RGB image keeps its ADC scale. A cell above the red endpoint still contributes its full response to the force estimate. The gain is local to this setup. Accuracy between the two fit endpoints must be tested independently. A per-cell pressure scale in kPa requires additional calibration.
+Follow the single action shown for each step and capture when the gauge reaches the target. The high calibration load requires a stable hold. Independent checks retain the first complete measurement window and its variation, including fluctuations on release. A gap in acquisition restarts the current sampling window. The window estimates total normal force on this sensor face from the sum of the 400 native noise-gated responses. The verification window uses the native RGB scale for its peak swatches. A cell above its red endpoint still contributes its full response to the force estimate. The gain is local to this setup. Accuracy between the two fit endpoints must be tested independently. A per-cell pressure scale in kPa requires additional calibration.
 
 The result compares the two peak colors and force estimates at the same gauge reading and shows the residual after release. Open the details to inspect individual signed errors and export the JSON report. To compare locations or indenters, apply the same check load and use **同载荷复测**. Every repeat uses the original gain. With the default bidirectional contact detector, reverse electrical excursions can also show up as contact on release. The signed response in the report helps identify that behavior. [Example verification window with simulated loads](known-load-check.png)
 

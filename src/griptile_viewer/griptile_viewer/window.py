@@ -10,8 +10,8 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from griptile_core.contact_image import (
-    CONTACT_COLOR_STOPS, CONTACT_OUTLINE_RGB, DEFAULT_CONTACT_SPAN, INVALID_RGB, SURFACE_SCALE,
-    UNLOADED_RGB, amplitude_rgb, contact_surface_rgb, surface_contact_outline,
+    CONTACT_COLOR_STOPS, CONTACT_MAP_STOPS, CONTACT_OUTLINE_RGB, DEFAULT_CONTACT_SPAN, INVALID_RGB,
+    SURFACE_SCALE, UNLOADED_RGB, amplitude_rgb, contact_map_rgb, footprint_surface,
 )
 
 from griptile_core.equalization import apply_equalization
@@ -46,19 +46,24 @@ def _contact_legend(peak):
     layout.addWidget(QtWidgets.QLabel("无载"))
     bar = QtWidgets.QFrame()
     bar.setObjectName("contactGradient")
-    stops = ", ".join(f"stop:{position:g} {QtGui.QColor(*rgb).name()}"
-                      for position, rgb in CONTACT_COLOR_STOPS)
-    bar.setStyleSheet(f"background: qlineargradient(x1:0, y1:0, x2:1, y2:0, {stops});")
     bar.setMinimumWidth(36)
     bar.setFixedHeight(6)
-    bar.setToolTip("浅蓝灰表示无载，受压响应增强时依次显为青、绿、黄、橙、红。中灰表示缺测。")
     bar.setAccessibleName("接触强度色带")
-    bar.setAccessibleDescription(bar.toolTip())
     layout.addWidget(bar, 1)
     layout.addWidget(QtWidgets.QLabel("强接触"))
     layout.addSpacing(6)
     layout.addWidget(peak)
     return legend
+
+
+def _set_contact_legend(legend, surface):
+    bar = legend.findChild(QtWidgets.QFrame, "contactGradient")
+    palette = CONTACT_MAP_STOPS if surface else CONTACT_COLOR_STOPS
+    stops = ", ".join(f"stop:{position:g} {QtGui.QColor(*rgb).name()}" for position, rgb in palette)
+    bar.setStyleSheet(f"background: qlineargradient(x1:0, y1:0, x2:1, y2:0, {stops});")
+    text = "无接触为深色，接触由蓝到紫到红。灰色表示缺测。" if surface else "响应由浅蓝灰、青、绿、黄到红。灰色表示缺测。"
+    bar.setAccessibleDescription(text)
+    bar.setToolTip(text)
 
 
 def _peak_label(amplitude, usable, span):
@@ -110,6 +115,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.model = model
         self.clock_ns = clock_ns
         self.request_reference = request_reference
+        self._last_reference_error = ""
         self.serial_control = serial_control
         self.serial_dialog = None
         self.equalization = EqualizationSettings(model)
@@ -124,13 +130,14 @@ class ViewerWindow(QtWidgets.QMainWindow):
             QFrame#contactMonitor { background: #273038; border-radius: 13px; }
             QFrame#contactMonitor QLabel { color: #d6dee4; font-size: 12px; }
             QFrame#contactMonitor QLabel#brand { color: #f0f5f7; font-weight: 600; font-size: 18px; }
+            QFrame#contactMonitor QLabel#contactGuide { background: #202a30; color: #e0e9ed; font-size: 16px; padding: 10px; }
             QLabel#reference, QLabel#legend { color: #b9cad2; font-size: 13px; }
             QPushButton, QComboBox, QSpinBox, QToolButton {
                 background: #25343f; color: #e5eef2; border: 1px solid #4a5b65;
                 border-radius: 4px; padding: 5px 9px; min-height: 19px;
             }
             QPushButton:hover { background: #304752; border-color: #7bcbbd; }
-            QPushButton#contactPrint { color: #f4d6ad; border-color: #876c51; padding: 2px 10px; }
+            QPushButton#contactPrint { color: #f4d6ad; border-color: #876c51; }
             QPushButton:disabled, QSpinBox:disabled { color: #90a1ab; background: #202b34; }
             QComboBox QAbstractItemView { color: #e5eef2; background: #25343f; }
         """)
@@ -155,7 +162,6 @@ class ViewerWindow(QtWidgets.QMainWindow):
         self.contact_print_button.setObjectName("contactPrint")
         self.contact_print_button.setAccessibleDescription("查看当前接触，也可回看上次留印")
         self.contact_print_button.clicked.connect(self.open_contact_print)
-        header.addWidget(self.contact_print_button)
         header.addStretch()
         self.status = QtWidgets.QLabel()
         self.status.setObjectName("status")
@@ -166,34 +172,38 @@ class ViewerWindow(QtWidgets.QMainWindow):
         monitor_layout.addLayout(header)
         actions = QtWidgets.QHBoxLayout()
         actions.setSpacing(6)
-        self.serial_button = QtWidgets.QPushButton("串口设置")
-        self.serial_button.setVisible(not model.replay)
-        self.serial_button.clicked.connect(self.open_serial_dialog)
-        actions.addWidget(self.serial_button)
-        self.equalization_button = QtWidgets.QPushButton("阵元标定")
-        self.equalization_button.setToolTip("使用均匀载荷标定各触点的相对灵敏度")
-        self.equalization_button.setVisible(not model.replay)
-        self.equalization_button.clicked.connect(self.open_equalization_dialog)
-        actions.addWidget(self.equalization_button)
-        self.reference_button = QtWidgets.QPushButton("采集无载参考")
-        self.reference_button.setToolTip("保持夹爪无载，采集 3 秒")
+        self.reference_button = QtWidgets.QPushButton("空载归零")
+        self.reference_button.setAccessibleDescription("完全松开夹爪后，采集空载读数")
         self.reference_button.clicked.connect(self.start_reference)
         actions.addWidget(self.reference_button)
-        self.load_dialog = None
-        self.load_button = QtWidgets.QPushButton("已知载荷验证")
-        self.load_button.clicked.connect(self.open_load_dialog)
-        actions.addWidget(self.load_button)
+        actions.addWidget(self.contact_print_button)
         actions.addStretch()
         self.details_button = QtWidgets.QToolButton()
         self.details_button.setText("详情")
         self.details_button.setCheckable(True)
         self.details_button.setArrowType(QtCore.Qt.RightArrow)
         self.details_button.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
-        self.details_button.setToolTip("显示模式、单点读数、参考和导出")
+        self.details_button.setAccessibleDescription("串口设置、标定、显示模式与导出")
         actions.addWidget(self.details_button)
         self.details = QtWidgets.QWidget()
         details_layout = QtWidgets.QVBoxLayout(self.details)
         details_layout.setContentsMargins(0, 0, 0, 0)
+        tools = QtWidgets.QHBoxLayout()
+        self.serial_button = QtWidgets.QPushButton("串口设置")
+        self.serial_button.setVisible(not model.replay)
+        self.serial_button.clicked.connect(self.open_serial_dialog)
+        tools.addWidget(self.serial_button)
+        self.equalization_button = QtWidgets.QPushButton("阵元标定")
+        self.equalization_button.setToolTip("使用均匀载荷标定各触点的相对灵敏度")
+        self.equalization_button.setVisible(not model.replay)
+        self.equalization_button.clicked.connect(self.open_equalization_dialog)
+        tools.addWidget(self.equalization_button)
+        self.load_dialog = None
+        self.load_button = QtWidgets.QPushButton("已知载荷验证")
+        self.load_button.clicked.connect(self.open_load_dialog)
+        tools.addWidget(self.load_button)
+        tools.addStretch()
+        details_layout.addLayout(tools)
         controls = QtWidgets.QHBoxLayout()
         self.mode = QtWidgets.QComboBox()
         self.mode.addItems(["接触图 RGB", "连续接触面（估算）", "原始 ADC", "相对无载参考 ΔADC"])
@@ -212,6 +222,15 @@ class ViewerWindow(QtWidgets.QMainWindow):
         controls.addStretch()
         details_layout.addLayout(controls)
         self.map = pg.PlotWidget(background="#273038")
+        guide_layout = QtWidgets.QVBoxLayout(self.map.viewport())
+        guide_layout.setContentsMargins(0, 0, 0, 0)
+        self.map_hint = QtWidgets.QLabel()
+        self.map_hint.setObjectName("contactGuide")
+        self.map_hint.setAlignment(QtCore.Qt.AlignCenter)
+        self.map_hint.setWordWrap(True)
+        self.map_hint.setTextFormat(QtCore.Qt.PlainText)
+        self.map_hint.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
+        guide_layout.addWidget(self.map_hint)
         self.map.getPlotItem().layout.setContentsMargins(0, 0, 0, 0)
         self.map.setMinimumSize(160, 160)
         self.map.setLabel("bottom", "列")
@@ -275,8 +294,8 @@ class ViewerWindow(QtWidgets.QMainWindow):
         details_layout.addLayout(footer)
         layout.addWidget(self.details, stretch=2)
         self._format = None
-        self._contour_input = None
-        self._surface_input = self._surface_span = self._surface_pixels = self._surface_thresholds = None
+        self._surface_input = self._surface_span = self._surface_pixels = None
+        self._outline_enabled = False
         self.contour_checkbox.toggled.connect(self.refresh)
         self.details_button.toggled.connect(self._show_details)
         self._show_details(False)
@@ -329,7 +348,8 @@ class ViewerWindow(QtWidgets.QMainWindow):
                 now = self.clock_ns()
                 span = self.model.current_reference.span_adc
                 if mode == SURFACE_MODE:
-                    pixels = contact_surface_rgb(self.model.contact_response(now), span)
+                    contact, _ = self.model.contact_surface_inputs(now, confirmed_only=True)
+                    pixels = contact_map_rgb(contact, span)
                 else:
                     amplitude = self.model.contact_response(now, allow_rgb_fallback=True)
                     pixels = self.model.contact_pixels(now) if amplitude is None else amplitude_rgb(amplitude, span)
@@ -344,6 +364,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
         if self.request_reference is None:
             raise ValueError("等待驱动的无载参考服务")
         self.request_reference(profile)
+        self._last_reference_error = ""
         if self.mode.currentIndex() != SURFACE_MODE:
             self.mode.setCurrentIndex(CONTACT_MODE)
 
@@ -430,23 +451,20 @@ class ViewerWindow(QtWidgets.QMainWindow):
             label = f"{value:g} {'ΔADC' if delta else 'ADC'}" if np.isfinite(value) else "无有效值"
             self.statusBar().showMessage(f"行 {cell[0]}  列 {cell[1]}    {label}", 1500)
 
-    def _surface(self, amplitude, span, thresholds, measured):
+    def _surface(self, amplitude, span):
         changed = not np.array_equal(self._surface_input, amplitude, equal_nan=True)
         if changed or self._surface_span != span:
-            self._surface_pixels = contact_surface_rgb(amplitude, span)
-        if thresholds is None:
-            if self._surface_thresholds is not None:
-                self.contour_image.clear()
-        elif (not np.array_equal(self._contour_input, measured, equal_nan=True)
-              or not np.array_equal(self._surface_thresholds, thresholds, equal_nan=True)):
-            edge = surface_contact_outline(measured, thresholds)
+            self._surface_pixels = contact_map_rgb(amplitude, span)
+        outline = self.contour_checkbox.isChecked()
+        if outline and (changed or not self._outline_enabled):
+            _, edge = footprint_surface(amplitude > 0, np.isfinite(amplitude))
             if edge.any():
                 self.contour_image.setImage(edge.astype(np.uint8), autoLevels=False, levels=(0, 1))
             else:
                 self.contour_image.clear()
-        self.contour_image.setVisible(thresholds is not None and self.contour_image.image is not None)
-        self._contour_input = measured if thresholds is not None else None
-        self._surface_input, self._surface_span, self._surface_thresholds = amplitude, span, thresholds
+        self.contour_image.setVisible(outline and self.contour_image.image is not None)
+        self._outline_enabled = outline
+        self._surface_input, self._surface_span = amplitude, span
         return self._surface_pixels
 
     def refresh(self, *, render_array=False):
@@ -494,13 +512,13 @@ class ViewerWindow(QtWidgets.QMainWindow):
         mode_changed = self._format != mode
         if mode_changed:
             self.image.setLookupTable({RAW_MODE: RAW, DELTA_MODE: DELTA}.get(mode))
+            if contact:
+                _set_contact_legend(self.scale, surface)
             self._format = mode
         if contact:
             thresholds = None
-            if profile is not None or (surface and self.contour_checkbox.isChecked()):
-                amplitude, thresholds = model.contact_surface_inputs(now)
-            elif surface:
-                amplitude = model.contact_response(now)
+            if profile is not None or surface:
+                amplitude, thresholds = model.contact_surface_inputs(now, confirmed_only=surface)
             elif model.replay:
                 amplitude = None  # Preserve the exact recorded RGB8 in the native view.
             else:
@@ -514,11 +532,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
                     # color rows known to have been sampled after the matched reference.
                     supported = False if thresholds is None else np.isfinite(thresholds)
                     amplitude = apply_equalization(np.where(supported, measured, np.nan), profile)
-                if surface:
-                    outline_thresholds = thresholds if self.contour_checkbox.isChecked() else None
-                    frame = self._surface(amplitude, span, outline_thresholds, measured)
-                else:
-                    frame = amplitude_rgb(amplitude, span)
+                frame = self._surface(amplitude, span) if surface else amplitude_rgb(amplitude, span)
                 usable = np.isfinite(amplitude)
                 active = amplitude > 0
                 self.peak.setText(_peak_label(amplitude, usable, span))
@@ -539,7 +553,7 @@ class ViewerWindow(QtWidgets.QMainWindow):
             summary = (f"有响应 {active.sum()} 点　有效像素 {usable.sum()}/400" if usable.any()
                        else "等待响应数据　有效像素 0/400")
             if surface:
-                summary = "300×300 插值显示 · 20×20 实测点　" + summary
+                summary = f"接触 {active.sum()} 点　有效 {usable.sum()}/400"
         else:
             levels = (-self.span.value(), self.span.value()) if delta else (0, 65535)
             self.image.setImage(model.values(now, delta), autoLevels=False, levels=levels)
@@ -563,40 +577,73 @@ class ViewerWindow(QtWidgets.QMainWindow):
             else:
                 self.line.setData([], [])
 
+        ref_info = self._update_monitor_status(valid, usable if contact else None, replay_pause, profile is not None)
+        reason = message.reason if message is not None and not valid.any() else ""
+        self.legend.setText("    ".join(filter(None, (model.sensor_id, summary, ref_info, reason, model.diagnostic,
+                                                    model.rejection, model.service_error))))
+
+    def _update_monitor_status(self, valid, contact_coverage, replay_pause, equalized):
+        model = self.model
+        message = model.message
+        fresh = bool(valid.any())
         if message is None:
-            state = "等待阵列数据"
+            state = "等待回放" if model.replay else "等待连接"
         elif not message.connected:
             state = "已断开"
         elif replay_pause:
             state = "回放暂停或等待下一帧"
-        elif not valid.any():
-            state = "等待新数据"
+        elif not fresh:
+            state = "等待读数"
         else:
             state = "播放中" if model.replay else "已连接"
-            coverage = usable if contact and model.reference is not None else valid
+            coverage = contact_coverage if contact_coverage is not None and model.reference is not None else valid
             if not coverage.all():
                 state += f" · 有效 {coverage.sum()}/{ROWS * COLS}"
         self.status.setText(f"{'回放' if model.replay else '实时'} · {state}")
         status = model.current_reference
         phase = status.phase if status else "unreferenced"
-        covered = sum(model.reference.valid_mask) if model.reference is not None else 0
         ref_info = ""
-        if phase == "ready" and model.reference:
-            text = "参考就绪" if covered == ROWS * COLS else f"参考 {covered}/400"
+        text = ""
+        if phase == "ready" and model.reference is not None:
+            covered = sum(model.reference.valid_mask)
+            text = "已归零" if covered == ROWS * COLS else f"已归零 {covered}/400 点"
+            if equalized:
+                text += " · 已均衡"
             ref_info = f"参考 {covered}/400　满量程 {status.span_adc:g} ADC"
         elif phase == "collecting":
-            text = f"保持无载 {status.progress:.0%}"
+            text = f"正在归零 {status.progress:.0%}"
         elif phase == "failed":
-            text = "参考未完成"
+            text = "归零未完成"
             ref_info = status.reason
-        else:
-            text = "待采无载参考" if valid.any() else ""
-        if profile is not None:
-            text = "阵元已均衡" if phase == "ready" else text
+        elif fresh:
+            text = "待归零"
         self.ref_status.setText(text)
-        can_collect = self.request_reference is not None and bool(valid.any()) and phase != "collecting"
+        can_collect = self.request_reference is not None and fresh and phase != "collecting"
         self.reference_button.setEnabled(can_collect)
-        self.reference_button.setVisible(can_collect and (covered < ROWS * COLS or self.details_button.isChecked()))
-        reason = message.reason if message is not None and not valid.any() else ""
-        self.legend.setText("    ".join(filter(None, (model.sensor_id, summary, ref_info, reason, model.diagnostic,
-                                                    model.rejection, model.service_error))))
+        if model.service_error != self._last_reference_error:
+            self._last_reference_error = model.service_error
+            if model.service_error:
+                self.statusBar().showMessage("未能设置空载参考，请在「详情」查看原因后重试。", 6000)
+
+        prompt = ""
+        if contact_coverage is not None and not contact_coverage.any():
+            if message is None or not message.connected:
+                prompt = "等待回放数据" if model.replay else "在「详情」中打开「串口设置」\n连接触觉传感器"
+            elif not fresh:
+                prompt = "等待下一帧回放数据" if model.replay else "等待传感器读数"
+            elif phase == "collecting":
+                prompt = "正在回放空载归零" if model.replay else "正在归零，请保持感应面空载"
+            elif phase == "ready":
+                prompt = "等待读取接触图"
+            elif model.replay:
+                prompt = "这段回放尚无可用的空载参考"
+            elif self.request_reference is None:
+                prompt = "等待空载参考"
+            elif phase == "failed":
+                prompt = "归零未完成\n请让感应面保持空载，再点「空载归零」"
+            else:
+                prompt = "让感应面保持空载\n然后点「空载归零」"
+        if self.map_hint.text() != prompt:
+            self.map_hint.setText(prompt)
+        self.map_hint.setVisible(bool(prompt))
+        return ref_info

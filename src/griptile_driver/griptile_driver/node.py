@@ -34,6 +34,7 @@ from griptile_core.serial_ports import available_ports, validate_port
 from griptile_core.serial_source import Batch, CLOCK_DOMAIN, MAX_READ_BYTES, SerialWorker, TIMING_SOURCE
 
 from .contact import ContactImaging
+from .reference_cache import ReferenceCache
 from .ros_messages import heatmap_message, sample_message, state_message
 
 
@@ -109,7 +110,7 @@ class TactileNode(Node):
                                            reliability=ReliabilityPolicy.RELIABLE))
         self._driver_version = version("griptile_driver")
         self._last_info = None
-        self.contact = ContactImaging(self, self.config["sensor_id"])
+        self.contact = ContactImaging(self, self.config["sensor_id"], reference_cache=ReferenceCache())
         self._publish_info()
         self.serial_service = self.create_service(ManageSerial, "manage_serial", self.manage_serial)
         self._pending_events = []

@@ -157,6 +157,12 @@ class ContactPrintCapture:
             self._preview = self._print(exposures, automatic=False)
         return self._preview
 
+    def active_taxels_at(self, stamp_ns):
+        """Continuation seeds only for the measured scan that established them."""
+        if self._samples and self._samples[-1].stamp_ns == stamp_ns:
+            return self._active_taxels
+        return None
+
     def preview(self):
         """Return the complete, time-registered print currently available to the shutter."""
         record = self.live_preview()
